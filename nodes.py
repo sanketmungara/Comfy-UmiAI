@@ -6,6 +6,10 @@ import glob
 import json
 import requests
 from collections import Counter
+import folder_paths
+import comfy.sd
+import comfy.utils
+import torch # Required for Z-Image Matrix Math
 
 # ==============================================================================
 # HELPER FUNCTIONS
@@ -590,6 +594,116 @@ class DanbooruReplacer:
 
         return self.pattern.sub(_replace_match, text)
 
+# ==============================================================================
+# LORA HANDLER (INTERNAL LOADING WITH Z-IMAGE SUPPORT)
+# ==============================================================================
+
+class LoRAHandler:
+    def __init__(self):
+        # Syntax: <lora:LoraName:Strength> or <lora:LoraName> (defaults to 1.0)
+        self.regex = re.compile(r'<lora:([^>:]+)(?::([0-9.]+))?>', re.IGNORECASE)
+
+    def patch_zimage_lora(self, lora):
+        """ Applies QKV fusion and key remapping for Z-Image LoRAs """
+        new_lora = {}
+        qkv_groups = {}
+        
+        for k, v in lora.items():
+            new_k = k
+            
+            # 1. Output Projection Fix (to_out.0 -> out)
+            if ".attention.to_out.0." in new_k:
+                new_k = new_k.replace(".attention.to_out.0.", ".attention.out.")
+                new_lora[new_k] = v
+                continue
+
+            # 2. Handle QKV Separation
+            if ".attention.to_" in new_k:
+                parts = new_k.split(".attention.to_")
+                base_prefix = parts[0] + ".attention" 
+                remainder = parts[1] # e.g. q.lora_A.weight
+                
+                qkv_type = remainder[0] # 'q', 'k', or 'v'
+                suffix = remainder[2:] # 'lora_A.weight'
+                
+                if base_prefix not in qkv_groups:
+                    qkv_groups[base_prefix] = {'q': {}, 'k': {}, 'v': {}}
+                
+                qkv_groups[base_prefix][qkv_type][suffix] = v
+                continue
+
+            new_lora[new_k] = v
+
+        # --- FUSE QKV ---
+        for base_key, group in qkv_groups.items():
+            # Check A weights (Down)
+            ak_a = "lora_A.weight"
+            if ak_a in group['q'] and ak_a in group['k'] and ak_a in group['v']:
+                q_a = group['q'][ak_a]
+                k_a = group['k'][ak_a]
+                v_a = group['v'][ak_a]
+                
+                # Stack A vertically: (3*rank, dim_in)
+                fused_A = torch.cat([q_a, k_a, v_a], dim=0)
+                new_lora[f"{base_key}.qkv.lora_A.weight"] = fused_A
+
+            # Check B weights (Up)
+            ak_b = "lora_B.weight"
+            if ak_b in group['q'] and ak_b in group['k'] and ak_b in group['v']:
+                q_b = group['q'][ak_b]
+                k_b = group['k'][ak_b]
+                v_b = group['v'][ak_b]
+                
+                # Block Diagonal B: (3*dim_out, 3*rank)
+                out_dim, rank = q_b.shape
+                fused_B = torch.zeros((out_dim * 3, rank * 3), dtype=q_b.dtype, device=q_b.device)
+                fused_B[0:out_dim, 0:rank] = q_b
+                fused_B[out_dim:2*out_dim, rank:2*rank] = k_b
+                fused_B[2*out_dim:3*out_dim, 2*rank:3*rank] = v_b
+                
+                new_lora[f"{base_key}.qkv.lora_B.weight"] = fused_B
+
+            # Handle Alphas
+            ak_alpha = "lora_alpha"
+            if ak_alpha in group['q']:
+                new_lora[f"{base_key}.qkv.lora_alpha"] = group['q'][ak_alpha]
+
+        return new_lora
+
+    def extract_and_load(self, text, model, clip):
+        matches = self.regex.findall(text)
+        clean_text = self.regex.sub("", text)
+
+        if model is None or clip is None:
+            return clean_text, model, clip
+
+        for match in matches:
+            name = match[0].strip()
+            strength = float(match[1]) if match[1] else 1.0
+            
+            lora_path = folder_paths.get_full_path("loras", name)
+            if not lora_path:
+                lora_path = folder_paths.get_full_path("loras", f"{name}.safetensors")
+            
+            if lora_path:
+                try:
+                    lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+                    
+                    # AUTO-DETECT Z-IMAGE Format
+                    # Heuristic: Check for 'to_q' keys which implies separate QKV
+                    is_zimage = any(".attention.to_q." in k for k in lora.keys())
+                    
+                    if is_zimage:
+                        lora = self.patch_zimage_lora(lora)
+                    
+                    model, clip = comfy.sd.load_lora_for_models(model, clip, lora, strength, strength)
+                except Exception as e:
+                    print(f"[UmiAI] Failed to load LoRA {name}: {e}")
+            else:
+                 print(f"[UmiAI] LoRA not found: {name}")
+
+        return clean_text, model, clip
+
 class NegativePromptGenerator:
     def __init__(self):
         self.negative_tag = set()
@@ -627,6 +741,8 @@ class UmiAIWildcardNode:
                 "autorefresh": (["Yes", "No"],),
             },
             "optional": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
                 "input_negative": ("STRING", {"multiline": True, "forceInput": True}),
                 "width": ("INT", {"default": 1024, "min": 64, "max": 8192}),
                 "height": ("INT", {"default": 1024, "min": 64, "max": 8192}),
@@ -635,8 +751,8 @@ class UmiAIWildcardNode:
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "INT", "INT")
-    RETURN_NAMES = ("text", "negative_text", "width", "height")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "STRING", "INT", "INT")
+    RETURN_NAMES = ("model", "clip", "text", "negative_text", "width", "height")
     FUNCTION = "process"
     CATEGORY = "UmiAI"
     
@@ -662,15 +778,12 @@ class UmiAIWildcardNode:
                         pass
         return text, settings
 
-    def process(self, text, seed, autorefresh, width, height, danbooru_threshold=0.75, danbooru_max_tags=15, input_negative=""):
+    def process(self, text, seed, autorefresh, width, height, model=None, clip=None, danbooru_threshold=0.75, danbooru_max_tags=15, input_negative=""):
         # ==============================================================================
         # PRE-PROCESSING: Comment Stripping
         # ==============================================================================
-        # We perform this first so comments don't get processed as prompts or variables.
-        # 1. Protect specific syntax that uses '#' inside tags (e.g. __#123$$wildcard__)
         protected_text = text.replace('__#', '___UMI_HASH_PROTECT___').replace('<#', '<___UMI_HASH_PROTECT___')
         
-        # 2. Strip C-style (//) and Shell-style (#) comments
         clean_lines = []
         for line in protected_text.splitlines():
             if '//' in line:
@@ -683,8 +796,6 @@ class UmiAIWildcardNode:
                 clean_lines.append(line)
         
         text = "\n".join(clean_lines)
-        
-        # 3. Restore protected seed-pinning syntax
         text = text.replace('___UMI_HASH_PROTECT___', '#').replace('<___UMI_HASH_PROTECT___', '<#')
 
         # ==============================================================================
@@ -702,6 +813,7 @@ class UmiAIWildcardNode:
         conditional_replacer = ConditionalReplacer()
         variable_replacer = VariableReplacer()
         danbooru_replacer = DanbooruReplacer(options)
+        lora_handler = LoRAHandler()
 
         globals_dict = tag_loader.load_globals()
         variable_replacer.load_globals(globals_dict)
@@ -714,7 +826,6 @@ class UmiAIWildcardNode:
         # Phase 1: Expansion Loop
         while previous_prompt != prompt and iterations < 50:
             previous_prompt = prompt
-            # Pass replacers to store_variables to force resolution immediately
             prompt = variable_replacer.store_variables(prompt, tag_replacer, dynamic_replacer)
             prompt = variable_replacer.replace_variables(prompt)
             prompt = tag_replacer.replace(prompt)
@@ -724,6 +835,10 @@ class UmiAIWildcardNode:
             
         # Phase 2: Logic & Cleanup
         prompt = conditional_replacer.replace(prompt)
+        
+        # Phase 3: LoRA Internal Loading
+        # We pass the model/clip in, and get the modified versions back
+        prompt, final_model, final_clip = lora_handler.extract_and_load(prompt, model, clip)
 
         additions = tag_selector.get_prefixes_and_suffixes()
         if additions['prefixes']:
@@ -752,4 +867,4 @@ class UmiAIWildcardNode:
         final_width = settings['width'] if settings['width'] > 0 else width
         final_height = settings['height'] if settings['height'] > 0 else height
 
-        return (prompt, final_negative, final_width, final_height)
+        return (final_model, final_clip, prompt, final_negative, final_width, final_height)

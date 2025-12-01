@@ -156,14 +156,14 @@ const HELP_STYLES = `
 
 const HELP_HTML = `
     <div class="umi-section">
-        <h3>🔌 Setup & Wiring</h3>
+        <h3>🔌 Setup & Wiring (The "Passthrough")</h3>
         <div class="umi-grid-2">
             <div class="callout callout-success" style="margin-top: 0;">
                 <h4 style="margin-top:0">Step 1: The Connections</h4>
-                <p>The UmiAI node acts as the "Brain" of your workflow.</p>
+                <p>This node now handles LoRAs internally.</p>
                 <ul class="step-list">
-                    <li>Connect <strong>Text Output</strong> to Positive CLIP.</li>
-                    <li>Connect <strong>Negative Output</strong> to Negative CLIP.</li>
+                    <li>Connect <strong>Checkpoint Output (MODEL/CLIP)</strong> -> <strong>UmiAI Input</strong>.</li>
+                    <li>Connect <strong>UmiAI Output (MODEL/CLIP)</strong> -> <strong>KSampler/Text Encode</strong>.</li>
                     <li>Connect <strong>Width/Height</strong> to Empty Latent Image.</li>
                 </ul>
             </div>
@@ -176,11 +176,6 @@ const HELP_HTML = `
                     <li>Select <strong>Convert height to input</strong>.</li>
                 </ul>
             </div>
-        </div>
-        <div class="callout callout-warn">
-            <strong>⚠️ CRITICAL: Batch Size vs. Queue Batch</strong><br>
-            If you set "Batch Size" to 4 on your Empty Latent node, you will get 4 <strong>identical</strong> images.
-            To generate variations (or use Sequential logic), leave Batch Size at 1 and use the <strong>"Queue Batch"</strong> setting in the ComfyUI menu instead.
         </div>
     </div>
 
@@ -202,7 +197,7 @@ const HELP_HTML = `
                 <table class="umi-table">
                     <tr><td><span class="umi-code">$var={...}</span></td><td>Define variable.</td></tr>
                     <tr><td><span class="umi-code">[if K: A | B]</span></td><td>Logic Gate.</td></tr>
-                    <tr><td><span class="umi-code">char:name</span></td><td>Danbooru Fetcher.</td></tr>
+                    <tr><td><span class="umi-code">&lt;lora:name:1.0&gt;</span></td><td>Load LoRA (Auto).</td></tr>
                     <tr><td><span class="umi-code">@@w=1024@@</span></td><td>Set Resolution.</td></tr>
                     <tr><td><span class="umi-code">**text**</span></td><td>Move to Negative.</td></tr>
                 </table>
@@ -210,6 +205,31 @@ const HELP_HTML = `
         </div>
     </div>
 
+    <div class="umi-section">
+        <h3>🔋 LoRA Loading (Internal)</h3>
+        <p>The node now patches the Model and CLIP for you. You do not need any external LoRA Loader nodes.</p>
+
+        <div class="umi-block">// Syntax: &lt;lora:Filename:Strength&gt;
+
+// Basic usage (Strength defaults to 1.0)
+&lt;lora:pixel_art_v2&gt;
+
+// With Strength
+&lt;lora:add_detail:0.5&gt;
+
+// Inside logic or variables!
+$style={ &lt;lora:anime:1.0&gt; | &lt;lora:realistic:0.8&gt; }
+A photo of a cat, $style</div>
+
+        <div class="callout callout-success">
+            <strong>✨ Auto-Detection (Standard & Z-Image):</strong><br>
+            The node automatically inspects the LoRA file.<br>
+            • If it is a <strong>Standard LoRA</strong>, it loads normally.<br>
+            • If it detects <strong>Z-Image keys</strong> (unfused QKV), it automatically applies the QKV fusion patch.<br>
+            You don't need to do anything special—just use the tag!
+        </div>
+    </div>
+    
     <div class="umi-section">
         <h3>📂 Creating & Using Wildcards</h3>
         <p>You can create your own lists in the <code>wildcards/</code> folder and use them in ComfyUI.</p>
@@ -239,12 +259,6 @@ Green</div>
                 <div class="umi-block">&lt;[red]&gt; background.</div>
             </div>
         </div>
-
-        <div class="callout callout-success">
-            <strong>✨ Pro Tip: Autocomplete</strong><br>
-            • Type <code>__</code> (double underscore) to see all your <strong>Files</strong>.<br>
-            • Type <code>&lt;</code> (less than) to see all your <strong>YAML Tags</strong>.
-        </div>
     </div>
 
     <div class="umi-section">
@@ -261,15 +275,6 @@ A photo of a woman with $hair hair. The wind blows her $hair hair.</div>
             <strong>✨ String Filters:</strong> Modify the variable output using dot notation.<br>
             <code>$var.clean</code> (Remove underscores) • <code>$var.upper</code> (UPPERCASE) • <code>$var.title</code> (Capitalize)
         </div>
-
-        <br>
-        <h4 style="margin-top:0">🌍 Global Presets</h4>
-        <p>Variables defined in <code>wildcards/globals.yaml</code> are available in <strong>every</strong> prompt automatically.</p>
-        <div class="umi-block">// In globals.yaml
-quality: "masterpiece, best quality, 8k"
-
-// In ComfyUI
-$quality, A photo of a cat.</div>
     </div>
 
     <div class="umi-section">
@@ -319,18 +324,6 @@ She is holding [if Fantasy: a sword | [if Cyberpunk: a pistol | a crowbar]].
 
 The background is a $genre landscape.
 **watermark, text, blurry, nsfw**</div>
-        </details>
-
-        <details>
-            <summary>📸 The "Virtual Photographer" (Camera Logic)</summary>
-            <div class="umi-block">$theme={Cyberpunk|High Fantasy|Modern Editorial}
-
-// Camera Logic based on Theme
-[if Cyberpunk: @@width=896, height=1152@@ (Shot on Phase One XF IQ4:1.2), 150MP, razor sharp, digital sensor]
-[if High Fantasy: @@width=1024, height=1280@@ (Shot on Kodak Portra 400:1.2), 35mm film grain, analog aesthetic]
-
-(Masterpiece, best quality, 8k), A breathtaking portrait of a $theme character.
-**cartoon, anime, 3d render, watermark**</div>
         </details>
     </div>
 `;
@@ -402,6 +395,7 @@ app.registerExtension({
 
                 const matchFile = beforeCursor.match(/__([\w\/\-]*)$/);
                 const matchTag = beforeCursor.match(/<([a-zA-Z0-9_\-\s]*)$/);
+                const matchLora = beforeCursor.match(/<lora:([^>]*)$/);
 
                 const ext = app.extensions.find(e => e.name === "UmiAI.WildcardSystem");
                 if (!ext || !ext.data) return;
@@ -421,6 +415,13 @@ app.registerExtension({
                     query = matchTag[1].toLowerCase();
                     matchIndex = matchTag.index;
                     options = ext.data.tags.filter(t => t.toLowerCase().includes(query));
+                } else if (matchLora) {
+                    triggerType = "lora";
+                    query = matchLora[1].toLowerCase();
+                    matchIndex = matchLora.index;
+                    if(ext.data.loras) {
+                        options = ext.data.loras.filter(l => l.toLowerCase().includes(query));
+                    }
                 }
 
                 if (triggerType && options.length > 0) {
@@ -430,7 +431,8 @@ app.registerExtension({
                     ext.popup.show(rect.left + 20, topOffset, options, (selected) => {
                         let completion = "";
                         if (triggerType === "file") completion = `__${selected}__`;
-                        else completion = `<[${selected}]>`; 
+                        else if (triggerType === "tag") completion = `<[${selected}]>`; 
+                        else if (triggerType === "lora") completion = `<lora:${selected}:1.0>`;
 
                         const prefix = text.substring(0, matchIndex);
                         const suffix = text.substring(cursor);

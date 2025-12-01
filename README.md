@@ -4,17 +4,16 @@
 
 **A "Logic Engine" for ComfyUI Prompts.**
 
-UmiAI transforms static prompts into dynamic, context-aware workflows. It introduces **Persistent Variables**, **Conditional Logic**, **Sequential Cycles**, and **External Data Fetching** (Danbooru) directly into your prompt text box.
+UmiAI transforms static prompts into dynamic, context-aware workflows. It introduces **Persistent Variables**, **Conditional Logic**, **Native LoRA Loading**, and **External Data Fetching** directly into your prompt text box.
 
 ## ✨ Key Features
 
-* **🧠 Persistent Variables:** Define a choice once (`$hair={Red|Blue}`) and reuse it (`$hair`) anywhere to ensure consistency across complex prompts.
-* **🌍 Global Presets:** Automatically load variables from `wildcards/globals.yaml` (e.g., `$quality`, `$negatives`) into *every* prompt without typing them.
-* **🔀 Conditional Logic:** `[if keyword : True Text | False Text]` logic gates. Perfect for ensuring your character's outfit matches the background genre automatically.
-* **🎨 Danbooru Integration:** Type `char:name` to automatically fetch visual appearance tags (eyes, hair, outfit) from Danbooru.
-* **🔁 Sequential Cycles:** `{~A|B|C}` cycles through options deterministically based on the seed. Essential for XY Plots and Grid comparisons.
-* **📝 Comments:** Use `//` or `#` to add notes to your prompts (stripped at runtime).
-* **⌨️ Autocomplete:** Built-in popup for Files (`__`) and Tags (`<`) directly in the text box.
+* **🔋 Native LoRA Loading:** Type `<lora:filename:1.0>` directly in the text. The node patches the model internally—no external LoRA Loader nodes required.
+* **🛠️ Z-Image Support:** Automatically detects and fixes Z-Image format LoRAs (QKV Fusion) on the fly.
+* **🧠 Persistent Variables:** Define a choice once (`$hair={Red|Blue}`) and reuse it (`$hair`) anywhere to ensure consistency.
+* **🔀 Conditional Logic:** `[if keyword : True Text | False Text]` logic gates. Perfect for ensuring outfits match genres.
+* **🌍 Global Presets:** Automatically load variables from `wildcards/globals.yaml` into *every* prompt.
+* **🎨 Danbooru Integration:** Type `char:name` to automatically fetch visual tags from Danbooru.
 * **📏 Resolution Control:** Set `@@width=1024@@` inside your prompt to control image size contextually.
 
 ---
@@ -28,8 +27,6 @@ UmiAI transforms static prompts into dynamic, context-aware workflows. It introd
     git clone https://github.com/Tinuva88/Comfy-UmiAI
     ```
 3.  **⚠️ IMPORTANT:** Rename the folder to `ComfyUI-UmiAI` if it isn't already.
-    * ❌ `ComfyUI-UmiAI v1.0` (Spaces break the Python import!)
-    * ✅ `ComfyUI-UmiAI`
 4.  Install dependencies:
     ```bash
     pip install -r requirements.txt
@@ -37,29 +34,30 @@ UmiAI transforms static prompts into dynamic, context-aware workflows. It introd
 5.  **Restart ComfyUI** completely.
 
 ### Method 2: ComfyUI Manager
-* **Install via Git URL:** Copy the URL of this repository and paste it into the "Install via Git URL" field in ComfyUI Manager.
+* **Install via Git URL:** Copy the URL of this repository and paste it into ComfyUI Manager.
 
 ---
 
-## 🔌 Wiring Guide
+## 🔌 Wiring Guide (The "Passthrough" Method)
 
-The UmiAI node acts as the "Central Brain" of your workflow.
+The UmiAI node acts as the "Central Brain". You must pass your **Model** and **CLIP** through it so it can apply LoRAs automatically.
 
-### 1. Connect Prompts
+### 1. The Main Chain
+1.  Connect **Checkpoint Loader (Model & CLIP)** ➔ **UmiAI Node (Inputs)**.
+2.  Connect **UmiAI Node (Model & CLIP)** ➔ **KSampler** / **Positive Prompt**.
+
+### 2. Connect Prompts
 * **Text Output** ➔ `CLIP Text Encode` (Positive)
 * **Negative Output** ➔ `CLIP Text Encode` (Negative)
-    * *This enables inline features like `**watermark**` removal.*
 
-### 2. Connect Resolution (Crucial!)
-To allow the node to control image size (e.g., `@@width=1024@@`), you must connect it to your Latent node.
+### 3. Connect Resolution (Crucial!)
+To allow the node to control image size (e.g., `@@width=1024@@`):
 1.  **Right-Click** your `Empty Latent Image` node.
-2.  Select **Convert width to input**.
-3.  Select **Convert height to input**.
-4.  Connect the **Width/Height** wires from UmiAI to the Latent node.
+2.  Select **Convert width to input** & **Convert height to input**.
+3.  Connect the **Width/Height** wires from UmiAI to the Latent node.
 
 > **⚠️ Note on Batch Size:**
-> Do **not** use the "Batch Size" widget on the Empty Latent node if you want prompt variations. You will get X copies of the same image.
-> Instead, use the **"Queue Batch"** setting in the ComfyUI Extra Options menu.
+> Use the **"Queue Batch"** setting in the ComfyUI Extra Options menu to generate variations. Do not use the widget batch size.
 
 ---
 
@@ -67,16 +65,39 @@ To allow the node to control image size (e.g., `@@width=1024@@`), you must conne
 
 | Feature | Syntax | Example |
 | :--- | :--- | :--- |
+| **Load LoRA** | `<lora:name:str>` | `<lora:pixel_art:0.8>` |
 | **Random Choice** | `{a\|b\|c}` | `{Red\|Blue\|Green}` |
 | **Variables** | `$var={opts}` | `$hair={Red\|Blue}` |
 | **Use Variable** | `$var` | `A photo of $hair hair.` |
-| **String Filters** | `$var.filter` | `$var.clean` / `$var.upper` / `$var.title` |
 | **Logic Gate** | `[if Key : A \| B]` | `[if Cyberpunk : Techwear \| Armor]` |
 | **Danbooru** | `char:name` | `char:frieren` |
 | **Sequential** | `{~a\|b\|c}` | `{~Front\|Side\|Back}` |
 | **Set Size** | `@@w=X, h=Y@@` | `@@width=1024, height=1536@@` |
-| **Negatives** | `**text**` | `A landscape **text, watermark**` |
 | **Comments** | `//` or `#` | `// This is a comment` |
+
+---
+
+## 🔋 LoRA & Z-Image System
+
+You no longer need to chain multiple LoRA Loader nodes. UmiAI handles it internally.
+
+### Basic Usage
+Type `<lora:` to trigger the autocomplete menu.
+```text
+<lora:my_style_v1:0.8>
+```
+
+### Z-Image Auto-Detection
+If you are using **Z-Image** LoRAs (which normally require special loaders due to QKV mismatch), UmiAI handles this automatically.
+1.  Load the file using the standard syntax: `<lora:z-image-anime:1.0>`
+2.  The node detects the key format and applies the **QKV Fusion Patch** instantly.
+
+### Dynamic LoRAs
+You can use wildcards or logic to switch LoRAs per generation:
+```text
+// Randomly pick a style LoRA
+{ <lora:anime_style:1.0> | <lora:realistic_v2:0.8> }
+```
 
 ---
 
@@ -85,56 +106,45 @@ To allow the node to control image size (e.g., `@@width=1024@@`), you must conne
 UmiAI reads files from the `wildcards/` folder.
 
 ### 1. Simple Text Lists (.txt)
-Create a file named `wildcards/colors.txt`:
+Create `wildcards/colors.txt`:
 ```text
 Red
 Blue
 Green
 ```
-**Usage:** Type `__` in ComfyUI to select `__colors__`.
+**Usage:** Type `__` to select `__colors__`.
 
 ### 2. Advanced Tag Lists (.yaml)
-Create a file named `wildcards/styles.yaml`:
+Create `wildcards/styles.yaml` (You can hide LoRAs here!):
 ```yaml
 Cyberpunk:
-    Tags: [scifi, neon]
+    Tags: <lora:neon_city:0.8>
     Prompts: ["neon lights", "chrome", "high tech"]
 ```
-**Usage:** Type `<` in ComfyUI to select `<[scifi]>`.
-
-### 3. Global Presets (globals.yaml)
-Variables defined here are available in **every** prompt automatically.
-Create `wildcards/globals.yaml`:
-```yaml
-quality: "masterpiece, best quality, 8k, highly detailed"
-negatives: "bad hands, text, watermark, nsfw"
-```
-**Usage:** Just type `$quality` or `**$negatives**` in any prompt.
+**Usage:** Type `<` to select `<[Cyberpunk]>`.
 
 ---
 
 ## 🚀 Example Workflow: The "Context-Aware" Character
 
-Copy this prompt into the node to test the full logic capabilities. It auto-selects a genre, then ensures the **Outfit**, **Weapon**, and **Resolution** all match that genre.
+Copy this prompt into the node to test Logic, Variables, and internal LoRA loading.
 
 ```text
-// 1. Define Variables
-$genre={High Fantasy|Cyberpunk|Post-Apocalyptic}
+// 1. Define Variables & Style
+$genre={High Fantasy|Cyberpunk}
 $view={~Portrait|Landscape}
 
-// 2. Logic: Set resolution based on View
+// 2. Logic: Set LoRA and Resolution based on Genre/View
+[if Cyberpunk: <lora:cyberpunk_v3:0.8>][if Fantasy: <lora:rpg_tools:1.0>]
 [if Portrait: @@width=1024, height=1536@@][if Landscape: @@width=1536, height=1024@@]
 
 // 3. Main Prompt
 (Masterpiece), A $view of a warrior, female.
 
-// 4. Context Logic (If genre matches, pick specific outfit)
-She is wearing [if Fantasy: plate armor | [if Cyberpunk: tech jacket | rags]].
-She is holding [if Fantasy: a sword | [if Cyberpunk: a pistol | a crowbar]].
+// 4. Context Logic (Outfit changes based on Genre variable)
+She is wearing [if Fantasy: plate armor | [if Cyberpunk: tech jacket]].
 
 The background is a $genre landscape.
-
-// 5. Inline Negatives
 **watermark, text, blurry, nsfw**
 ```
 
@@ -142,15 +152,6 @@ The background is a $genre landscape.
 
 ## 💬 Community & Support
 
-Join the **Umi AI** Discord server to share workflows, get help, and discuss new features!
+Join the **Umi AI** Discord server to share workflows and get help!
 
 👉 **[Join our Discord Server](https://discord.gg/9K7j7DTfG2)**
-
----
-
-## ❓ Troubleshooting
-
-**The "User Guide" menu option isn't showing up!**
-1.  **Browser Cache:** Press `CTRL+F5` (Windows) or `Cmd+Shift+R` (Mac) to hard refresh ComfyUI.
-2.  **Folder Name:** Ensure your installation folder does **not** have spaces or dots (e.g., `UmiAI v1.0`). It must be a valid Python module name like `UmiAI_Wildcards`.
-3.  **Console Check:** Press F12 -> Console. If you see red errors, ensure you installed `requests` and `pyyaml`.

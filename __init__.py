@@ -4,6 +4,7 @@ from aiohttp import web
 import os
 import glob
 import yaml
+import folder_paths # New Import for LoRA scanning
 
 # 1. Setup the API Route
 def get_wildcard_data():
@@ -34,9 +35,11 @@ def get_wildcard_data():
                     except Exception as e:
                         print(f"[UmiAI] Error parsing YAML {filepath}: {e}")
 
+    # Return Files, Tags, AND LoRAs
     return {
         "files": sorted(files),
-        "tags": sorted(list(tags))
+        "tags": sorted(list(tags)),
+        "loras": folder_paths.get_filename_list("loras")
     }
 
 # Register the route
