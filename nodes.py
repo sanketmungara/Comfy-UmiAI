@@ -59,7 +59,7 @@ def parse_wildcard_range(range_str, num_variants):
 
 def process_wildcard_range(tag, lines):
     if not lines: return ""
-    if tag.startswith('#'): return "" # Fixed: Return empty string instead of None
+    if tag.startswith('#'): return None
     
     if "$$" not in tag:
         selected = random.choice(lines)
@@ -243,10 +243,9 @@ class TagSelector:
             if isinstance(selected, str) and '#' in selected:
                 selected = selected.split('#')[0].strip()
 
-        return selected if selected is not None else ""
+        return selected
 
     def resolve_wildcard_recursively(self, value, seed_id=None):
-        if not value: return ""
         if value.startswith('__') and value.endswith('__'):
             nested_tag = value[2:-2]
             nested_seed = f"{seed_id}_{nested_tag}" if seed_id else None
@@ -322,8 +321,7 @@ class TagSelector:
         if groups: return self.get_tag_group_choice(parsed_tag, groups, tags)
         if tags: return self.get_tag_choice(parsed_tag, tags)
         
-        # FIXED: Return empty string instead of None if tag not found
-        return "" 
+        return None 
 
     def get_prefixes_and_suffixes(self):
         prefixes, suffixes, neg_p, neg_s = [], [], [], []
@@ -432,11 +430,21 @@ class DynamicPromptReplacer:
 
 class ConditionalReplacer:
     def __init__(self):
-        # Syntax: [if Trigger : True | False]
-        # FIX: Changed (.*?) to ([^\[\]]*?) to strictly match inner-most tags first.
-        self.regex = re.compile(r'\[if\s+([^\[\]]+?)\s*:\s*([^\[\]]*?)(?:\s*\|\s*([^\[\]]*?))?\]', re.IGNORECASE | re.DOTALL)
+        # Improved Regex:
+        # 1. Matches [if ... ]
+        # 2. Trigger: Anything except ':', '|', or ']'
+        # 3. Content: Matches ANY character (including [ and ]) UNLESS it starts a new "[if" tag.
+        #    This forces the loop to resolve nested "[if" blocks first, preventing the "dangling ]" bug,
+        #    while still allowing things like "color [red]" to exist inside the text.
+        self.regex = re.compile(
+            r'\[if\s+([^:|\]]+?)\s*:\s*((?:(?!\[if).)*?)(?:\s*\|\s*((?:(?!\[if).)*?))?\]', 
+            re.IGNORECASE | re.DOTALL
+        )
 
     def replace(self, prompt):
+        # Loop until no more [if ...] tags match.
+        # Because the regex refuses to match if it sees a nested "[if", 
+        # this loop naturally resolves from the innermost block outwards.
         while True:
             match = self.regex.search(prompt)
             if not match: break
@@ -446,12 +454,16 @@ class ConditionalReplacer:
             true_text = match.group(2)
             false_text = match.group(3) if match.group(3) else ""
 
-            temp_prompt = prompt.replace(full_tag, "")
-            
-            if trigger_word.lower() in temp_prompt.lower():
-                prompt = prompt.replace(full_tag, true_text, 1)
+            # Calculate replacement
+            if trigger_word.lower() in prompt.replace(full_tag, "").lower():
+                replacement = true_text
             else:
-                prompt = prompt.replace(full_tag, false_text, 1)
+                replacement = false_text
+            
+            # We use string replace on the specific match to handle duplicates correctly
+            # (Though re.sub with count=1 is safer if the prompt has identical tags)
+            prompt = prompt.replace(full_tag, replacement, 1)
+            
         return prompt
 
 class VariableReplacer:
