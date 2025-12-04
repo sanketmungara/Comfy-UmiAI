@@ -896,13 +896,13 @@ class UmiAIWildcardNode:
             "optional": {
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
-                "lora_tags_behavior": (["Disabled", "Append to Prompt", "Prepend to Prompt"],),
-                "naturalize_prompt": (["No", "Yes"],),
+                "lora_tags_behavior": (["Append to Prompt", "Disabled", "Prepend to Prompt"],),
+                "llm_prompt_enhancer": (["No", "Yes"],),
                 "llm_model": (llm_options,),
                 
                 # --- LLM SETTINGS ---
                 "llm_temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "llm_max_tokens": ("INT", {"default": 600, "min": 100, "max": 4096}),
+                "llm_max_tokens": ("INT", {"default": 400, "min": 100, "max": 4096}),
                 "custom_system_prompt": ("STRING", {"multiline": True, "default": "", "placeholder": "Leave empty to use the default 'Creative Writer' persona..."}),
                 # --------------------
 
@@ -1038,11 +1038,11 @@ class UmiAIWildcardNode:
 
     def process(self, text, seed, autorefresh, width, height, 
                 model=None, clip=None, 
-                lora_tags_behavior="Disabled", 
-                naturalize_prompt="No", 
+                lora_tags_behavior="Append to Prompt", 
+                llm_prompt_enhancer="No", 
                 llm_model="None", 
                 llm_temperature=0.7,      
-                llm_max_tokens=600,       
+                llm_max_tokens=400,       
                 custom_system_prompt="",  
                 danbooru_threshold=0.75, 
                 danbooru_max_tags=15, 
@@ -1124,7 +1124,7 @@ class UmiAIWildcardNode:
         prompt = prompt.strip(',')
 
         # Phase 2.5: LLM Naturalization (OPTIONAL)
-        if naturalize_prompt == "Yes" and llm_model != "None":
+        if llm_prompt_enhancer == "Yes" and llm_model != "None":
             # 1. Extract LoRA tags
             lora_regex = re.compile(r'<lora:[^>]+>')
             lora_tags = lora_regex.findall(prompt)

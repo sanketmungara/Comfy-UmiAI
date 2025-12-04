@@ -366,7 +366,7 @@ $class={Knight|Cyberpunk}
             </div>
             <div style="background: #151515; padding: 10px; border-radius: 6px;">
                 <strong>2. Usage</strong><br>
-                <span style="font-size:12px; color:#888;">Set <code>naturalize_prompt</code> to <strong>"Yes"</strong>.<br>Input: "1girl, solo, beach"<br>Output: "A stunning close-up of a lone woman standing on a sunlit beach..."</span>
+                <span style="font-size:12px; color:#888;">Set <code>llm_prompt_enhancer</code> to <strong>"Yes"</strong>.<br>Input: "1girl, solo, beach"<br>Output: "A stunning close-up of a lone woman standing on a sunlit beach..."</span>
             </div>
         </div>
         <p style="font-size:12px; color:#888;">*Note: This feature automatically protects your LoRA tags &lt;...&gt; from being rewritten by the LLM.</p>
@@ -481,7 +481,7 @@ app.registerExtension({
             // DYNAMIC WIDGET VISIBILITY LOGIC
             // ============================================================
             const llmWidgets = ["llm_model", "llm_temperature", "llm_max_tokens", "custom_system_prompt"];
-            const triggerName = "naturalize_prompt";
+            const triggerName = "llm_prompt_enhancer";
             
             // Find the widgets
             const triggerWidget = this.widgets.find(w => w.name === triggerName);
