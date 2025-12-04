@@ -190,9 +190,40 @@ class TagLoader:
                 return self.loaded_tags[key]
 
         if key is ALL_KEY:
-            pass
+            files = glob.glob(os.path.join(self.wildcard_location, '**/*.yaml'), recursive=True)
+            output = {}
+            for fp in files:
+                if os.path.basename(fp) == 'globals.yaml': continue
+                with open(fp, encoding="utf8") as file:
+                    self.files.append(f"{fp}.yaml")
+                    try:
+                        data = yaml.safe_load(file)
+                        if isinstance(data, dict):
+                            for title, entry in data.items():
+                                if isinstance(entry, dict):
+                                    processed_entry = self.process_yaml_entry(title, entry)
+                                    if processed_entry['tags']:
+                                        output[title] = set(processed_entry['tags'])
+                                        self.yaml_entries[title] = processed_entry
+                    except Exception as e:
+                        if verbose: print(f'Error parsing YAML {fp}: {e}')
+            self.loaded_tags[key] = output
+
         if real_path and real_path.endswith('.yaml'):
-             pass
+            with open(real_path, encoding="utf8") as file:
+                self.files.append(f"{file_path}.yaml")
+                try:
+                    data = yaml.safe_load(file)
+                    output = {}
+                    for title, entry in data.items():
+                        if isinstance(entry, dict):
+                            processed_entry = self.process_yaml_entry(title, entry)
+                            if processed_entry['tags']:
+                                output[title] = set(processed_entry['tags'])
+                                self.yaml_entries[title] = processed_entry
+                    self.loaded_tags[key] = output
+                except Exception as e:
+                    if verbose: print(f'Error parsing YAML {real_path}: {e}')
 
         return self.loaded_tags.get(key, [])
 
@@ -213,6 +244,10 @@ class TagSelector:
         self.resolved_seeds = {}
         self.selected_entries = {}
         self.scoped_negatives = []
+        self.variables = {} # NEW: Aware of variables
+
+    def update_variables(self, variables):
+        self.variables = variables
 
     def clear_seeded_values(self):
         self.seeded_values = {}
@@ -233,6 +268,7 @@ class TagSelector:
         return text
 
     def get_tag_choice(self, parsed_tag, tags):
+        # CSV Handling
         if isinstance(tags, list) and len(tags) > 0 and isinstance(tags[0], dict):
             row = random.choice(tags)
             vars_out = []
@@ -299,6 +335,48 @@ class TagSelector:
 
     def get_tag_group_choice(self, parsed_tag, groups, tags):
         if not isinstance(tags, dict): return ""
+        
+        # NEW: Resolve variables inside tag groups immediately
+        # This handles <[$char][outfit]> where $char needs to become 'rin_tohsaka'
+        resolved_groups = []
+        for g in groups:
+            clean_g = g.strip()
+            if clean_g.startswith('$') and clean_g[1:] in self.variables:
+                # Variable found! Use its value
+                val = self.variables[clean_g[1:]]
+                resolved_groups.append(val)
+            else:
+                resolved_groups.append(clean_g)
+
+        neg_groups = {x.replace('--', '').strip().lower() for x in resolved_groups if x.startswith('--')}
+        pos_groups = {x.strip().lower() for x in resolved_groups if not x.startswith('--') and '|' not in x}
+        any_groups = [{y.strip() for y in x.lower().split('|')} for x in resolved_groups if '|' in x]
+
+        candidates = []
+        for title, tag_set in tags.items():
+            if not pos_groups.issubset(tag_set): continue
+            if not neg_groups.isdisjoint(tag_set): continue
+            if any_groups:
+                if not all(not group.isdisjoint(tag_set) for group in any_groups):
+                    continue
+            candidates.append(title)
+
+        if candidates:
+            seed_match = re.match(r'#([0-9|]+)\$\$(.*)', parsed_tag)
+            seed_id = seed_match.group(1) if seed_match else None
+            
+            selected_title = random.choice(candidates)
+            if seed_id and seed_id in self.seeded_values:
+                selected_title = self.seeded_values[seed_id]
+            elif seed_id:
+                self.seeded_values[seed_id] = selected_title
+                
+            entry_details = self.tag_loader.get_entry_details(selected_title)
+            if entry_details:
+                self.selected_entries[parsed_tag] = entry_details
+                if entry_details['prompts']:
+                    return self.resolve_wildcard_recursively(random.choice(entry_details['prompts']), seed_id)
+            return self.resolve_wildcard_recursively(selected_title, seed_id)
         return ""
 
     def select(self, tag, groups=None):
@@ -330,13 +408,11 @@ class TagSelector:
         if sequential and isinstance(tags, list) and tags:
             idx = self.global_seed % len(tags)
             selected = tags[idx]
-            
             if isinstance(selected, dict):
                  vars_out = []
                  for k, v in selected.items():
                      vars_out.append(f"${k.strip()}={v.strip()}")
                  return " ".join(vars_out)
-            
             if '#' in selected: selected = selected.split('#')[0].strip()
             selected = self.process_scoped_negative(selected)
             return self.resolve_wildcard_recursively(selected, self.global_seed)
@@ -1016,6 +1092,11 @@ class UmiAIWildcardNode:
         while previous_prompt != prompt and iterations < 50:
             previous_prompt = prompt
             prompt = variable_replacer.store_variables(prompt, tag_replacer, dynamic_replacer)
+            
+            # --- NEW: UPDATE TAG SELECTOR WITH VARIABLES ---
+            tag_selector.update_variables(variable_replacer.variables)
+            # -----------------------------------------------
+            
             prompt = variable_replacer.replace_variables(prompt)
             prompt = tag_replacer.replace(prompt)
             prompt = dynamic_replacer.replace(prompt)
