@@ -6,7 +6,7 @@ import glob
 import json
 import csv
 import requests
-import fnmatch  # <--- NEW IMPORT
+import fnmatch
 from collections import Counter
 import folder_paths
 import comfy.sd
@@ -53,7 +53,7 @@ DOWNLOADABLE_MODELS = {
 # HELPER FUNCTIONS
 # ==============================================================================
 
-ALL_KEY = 'all yaml files'
+ALL_KEY = 'all_files_index'
 
 def get_index(items, item):
     try:
@@ -140,13 +140,24 @@ class TagLoader:
             GLOBAL_CACHE.clear()
             if self.verbose: print("[UmiAI] Cache cleared. Refreshing files...")
 
-        self.all_txt_files = glob.glob(os.path.join(self.wildcard_location, '**/*.txt'), recursive=True)
-        self.all_yaml_files = glob.glob(os.path.join(self.wildcard_location, '**/*.yaml'), recursive=True)
-        self.all_csv_files = glob.glob(os.path.join(self.wildcard_location, '**/*.csv'), recursive=True)
+        # Initialize explicit mappings for direct file access
+        self.txt_basename_to_path = {}
+        self.yaml_basename_to_path = {}
+        self.csv_basename_to_path = {}
         
-        self.txt_basename_to_path = {os.path.basename(file).lower().split('.')[0]: file for file in self.all_txt_files}
-        self.yaml_basename_to_path = {os.path.basename(file).lower().split('.')[0]: file for file in self.all_yaml_files}
-        self.csv_basename_to_path = {os.path.basename(file).lower().split('.')[0]: file for file in self.all_csv_files}
+        # We populate the maps once during init using os.walk for robustness
+        for root, dirs, files in os.walk(self.wildcard_location):
+            for file in files:
+                full_path = os.path.join(root, file)
+                name_lower = file.lower()
+                basename = os.path.splitext(name_lower)[0]
+                
+                if name_lower.endswith('.txt'):
+                    self.txt_basename_to_path[basename] = full_path
+                elif name_lower.endswith('.yaml'):
+                    self.yaml_basename_to_path[basename] = full_path
+                elif name_lower.endswith('.csv'):
+                    self.csv_basename_to_path[basename] = full_path
 
     def load_globals(self):
         global_path = os.path.join(self.wildcard_location, 'globals.yaml')
@@ -245,45 +256,70 @@ class TagLoader:
                 GLOBAL_CACHE[cache_key] = lines
                 return lines
 
-        # --- YAML Handling (ALL FILES) ---
+        # --- LOAD ALL FILES (YAML, TXT, CSV) ---
         if key is ALL_KEY:
-            files = glob.glob(os.path.join(self.wildcard_location, '**/*.yaml'), recursive=True)
             output = {}
             
-            for fp in files:
-                if os.path.basename(fp) == 'globals.yaml': continue
-                with open(fp, encoding="utf8") as file:
-                    self.files.append(f"{fp}.yaml")
-                    try:
-                        data = yaml.safe_load(file)
-                        if isinstance(data, dict):
-                            
-                            # AUTO-DETECT FORMAT PER FILE
-                            if self.is_umi_format(data):
-                                # Umi (Flat) Logic
-                                for title, entry in data.items():
-                                    if isinstance(entry, dict):
-                                        processed_entry = self.process_yaml_entry(title, entry)
-                                        if processed_entry['tags']:
-                                            output[title] = set(processed_entry['tags'])
-                                            self.yaml_entries[title] = processed_entry
-                                    elif isinstance(entry, list):
-                                        output[title] = entry
-                            else:
-                                # Nested (Hierarchical) Logic
-                                flattened = self.flatten_hierarchical_yaml(data)
-                                output.update(flattened)
+            # Use os.walk for robust directory traversal
+            for root, dirs, files in os.walk(self.wildcard_location):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    rel_path = os.path.relpath(fp, self.wildcard_location)
+                    # Normalize slashes for consistency across OS
+                    clean_key = os.path.splitext(rel_path)[0].replace(os.sep, '/')
+                    base_key = os.path.basename(clean_key)
+                    
+                    if file.endswith('.txt'):
+                        try:
+                            with open(fp, encoding="utf8") as f:
+                                lines = read_file_lines(f)
+                                # IMPORTANT: Only add to index if file is NOT empty
+                                if lines:
+                                    output[clean_key] = lines
+                                    if base_key not in output: output[base_key] = lines
+                        except Exception as e:
+                            if verbose: print(f'Error TXT {fp}: {e}')
 
-                    except Exception as e:
-                        if verbose: print(f'Error parsing YAML {fp}: {e}')
-            
+                    elif file.endswith('.yaml'):
+                        if file == 'globals.yaml': continue
+                        try:
+                            with open(fp, encoding="utf8") as f:
+                                data = yaml.safe_load(f)
+                                if isinstance(data, dict):
+                                    if self.is_umi_format(data):
+                                        for title, entry in data.items():
+                                            if isinstance(entry, dict):
+                                                processed_entry = self.process_yaml_entry(title, entry)
+                                                if processed_entry['tags']:
+                                                    output[title] = set(processed_entry['tags'])
+                                                    self.yaml_entries[title] = processed_entry
+                                            elif isinstance(entry, list) and entry:
+                                                output[title] = entry
+                                    else:
+                                        flattened = self.flatten_hierarchical_yaml(data)
+                                        # Filter out empty lists from flattened data
+                                        clean_flattened = {k: v for k, v in flattened.items() if v}
+                                        output.update(clean_flattened)
+                        except Exception as e:
+                            if verbose: print(f'Error YAML {fp}: {e}')
+                            
+                    elif file.endswith('.csv'):
+                         try:
+                            with open(fp, 'r', encoding='utf-8') as f:
+                                reader = csv.DictReader(f)
+                                rows = list(reader)
+                                if rows:
+                                    output[clean_key] = rows
+                                    if base_key not in output: output[base_key] = rows
+                         except Exception as e:
+                             if verbose: print(f'Error CSV {fp}: {e}')
+
             GLOBAL_CACHE[cache_key] = output
             return output
 
         # --- YAML Handling (Specific File) ---
         if real_path and real_path.endswith('.yaml'):
             with open(real_path, encoding="utf8") as file:
-                self.files.append(f"{file_path}.yaml")
                 try:
                     data = yaml.safe_load(file)
                     output = {}
@@ -497,10 +533,14 @@ class TagSelector:
         if '*' in parsed_tag or '?' in parsed_tag:
             matches = self.tag_loader.get_glob_matches(parsed_tag)
             if matches:
-                # Randomly pick one of the matching keys and resolve it
-                selected_key = random.choice(matches)
-                return self.select(selected_key, groups)
-            # If no matches, fall through to try normal loading (unlikely to work, but safe)
+                # Retry loop to find a non-empty result (up to 20 times)
+                for _ in range(20):
+                    selected_key = random.choice(matches)
+                    result = self.select(selected_key, groups)
+                    if result and str(result).strip():
+                        return result
+            # If nothing worked after retries, return empty string
+            return ""
 
         sequential = False
         if parsed_tag.startswith('~'):
