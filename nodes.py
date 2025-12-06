@@ -334,11 +334,15 @@ class TagLoader:
                         flat_data = self.flatten_hierarchical_yaml(data)
                         
                         if key_suffix:
-                            # Look for the suffix in the flattened data
-                            if key_suffix in flat_data:
-                                res = flat_data[key_suffix]
-                                GLOBAL_CACHE[requested_tag] = res
-                                return res
+                            # BUG FIX: Case-Insensitive Lookup
+                            # The user might ask for 'tropical' but key is 'Tropical'
+                            # We check lowercased keys against our lowercased suffix
+                            for k, v in flat_data.items():
+                                if k.lower() == key_suffix:
+                                    GLOBAL_CACHE[requested_tag] = v
+                                    return v
+                            # Fallback if no fuzzy match found
+                            return []
                         else:
                             return []
 
