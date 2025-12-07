@@ -22,6 +22,8 @@ from aiohttp import web
 # GLOBAL CACHE
 # ==============================================================================
 GLOBAL_CACHE = {}
+# Performance Fix: Persist the card index across generations
+GLOBAL_INDEX = {'built': False, 'files': set(), 'entries': {}} 
 
 # ==============================================================================
 # OPTIONAL IMPORTS (LLM & Downloader)
@@ -165,10 +167,18 @@ class TagLoader:
                     self.csv_lookup[key.lower()] = full_path
 
     def build_index(self):
+        # OPTIMIZATION: Check if we already did this work globally
+        if GLOBAL_INDEX['built']:
+            self.files_index = GLOBAL_INDEX['files']
+            self.yaml_entries = GLOBAL_INDEX['entries']
+            self.index_built = True
+            return
+
         if self.index_built:
             return
 
         new_index = set()
+        new_entries = {}
         
         # 1. Add Files (TXT/CSV)
         for key in self.txt_lookup.keys():
@@ -183,9 +193,16 @@ class TagLoader:
             try:
                 with open(full_path, encoding="utf8") as f:
                     data = yaml.safe_load(f)
+                    
+                    # Fix: Immediate population of entries for Umi format
                     if self.is_umi_format(data):
-                         for k in data.keys():
+                         for k, v in data.items():
                              new_index.add(k)
+                             # Store card data
+                             if isinstance(v, dict):
+                                 processed = self.process_yaml_entry(k, v)
+                                 if processed['tags']:
+                                     new_entries[k.lower()] = processed
                     else:
                         flat_data = self.flatten_hierarchical_yaml(data)
                         for k in flat_data.keys():
@@ -194,8 +211,15 @@ class TagLoader:
             except Exception as e:
                 pass
 
+        # Save to Instance
         self.files_index = new_index
+        self.yaml_entries = new_entries
         self.index_built = True
+        
+        # Save to Global Cache (Persist for next run)
+        GLOBAL_INDEX['files'] = new_index
+        GLOBAL_INDEX['entries'] = new_entries
+        GLOBAL_INDEX['built'] = True
 
     def load_globals(self):
         global_path = os.path.join(self.wildcard_location, 'globals.yaml')
@@ -234,28 +258,42 @@ class TagLoader:
         return results
 
     def is_umi_format(self, data):
+        """
+        Determines if the YAML file follows the Umi 'Card' structure.
+        Criteria: The data is a dictionary, and at least one of its values 
+        is a dictionary containing a 'Prompts' key (case-insensitive).
+        """
         if not isinstance(data, dict):
             return False
-        umi_keys = {'prompts', 'description', 'tags', 'prefix', 'suffix'}
-        for k, v in data.items():
-            if isinstance(v, dict):
-                inner_keys = {str(ik).lower() for ik in v.keys()}
-                if not inner_keys.isdisjoint(umi_keys):
+        
+        # We iterate through the top-level keys (Card Titles)
+        for key, value in data.items():
+            if isinstance(value, dict):
+                # Check keys case-insensitively for 'prompts'
+                keys_lower = {k.lower() for k in value.keys()}
+                if 'prompts' in keys_lower:
                     return True
         return False
 
     def load_tags(self, requested_tag, verbose=False):
+        # Fix: Handle Global Index Request for Tag Aggregation
+        if requested_tag == ALL_KEY:
+            self.build_index() # Ensure we have data
+            return self.yaml_entries
+
         if requested_tag in GLOBAL_CACHE:
             return GLOBAL_CACHE[requested_tag]
         
         lower_tag = requested_tag.lower()
         
+        # 1. Try TXT files
         if lower_tag in self.txt_lookup:
             with open(self.txt_lookup[lower_tag], encoding="utf8") as f:
                 lines = read_file_lines(f)
                 GLOBAL_CACHE[requested_tag] = lines
                 return lines
         
+        # 2. Try CSV files
         if lower_tag in self.csv_lookup:
             with open(self.csv_lookup[lower_tag], 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
@@ -263,6 +301,7 @@ class TagLoader:
                 GLOBAL_CACHE[requested_tag] = rows
                 return rows
 
+        # 3. YAML Handling (Branching Path)
         parts = lower_tag.split('/')
         found_file = None
         key_suffix = ""
@@ -283,31 +322,41 @@ class TagLoader:
                 try:
                     data = yaml.safe_load(file)
                     
+                    # SYSTEM 1: Umi "Card" System
                     if self.is_umi_format(data):
+                        # Populate global index if not already (mostly handled by build_index now)
                         for title, entry in data.items():
                             if isinstance(entry, dict):
                                 processed = self.process_yaml_entry(title, entry)
                                 if processed['tags']:
-                                    self.yaml_entries[title] = processed
+                                    self.yaml_entries[title.lower()] = processed
+
+                        # Return specific card if requested
                         if key_suffix:
                              for k, v in data.items():
                                  if k.lower() == key_suffix:
                                      processed = self.process_yaml_entry(k, v)
                                      GLOBAL_CACHE[requested_tag] = processed['prompts']
                                      return processed['prompts']
-                        else:
-                            return []
+                        return []
+
+                    # SYSTEM 2: Standard "Folder" System (Hierarchical)
                     else:
                         flat_data = self.flatten_hierarchical_yaml(data)
                         if key_suffix:
-                            # Case-Insensitive Lookup
+                            # Exact path match (case-insensitive)
                             for k, v in flat_data.items():
                                 if k.lower() == key_suffix:
                                     GLOBAL_CACHE[requested_tag] = v
                                     return v
                             return []
                         else:
-                            return []
+                            # Return all leaves if root file selected
+                            all_values = []
+                            for v in flat_data.values():
+                                all_values.extend(v)
+                            return all_values
+
                 except Exception as e:
                     if verbose: print(f'Error parsing YAML {found_file}: {e}')
 
@@ -318,6 +367,9 @@ class TagLoader:
         return fnmatch.filter(self.files_index, pattern)
 
     def get_entry_details(self, title):
+        # Fallback if entry is not in dict but index is built
+        if title and title.lower() in self.yaml_entries:
+            return self.yaml_entries[title.lower()]
         return self.yaml_entries.get(title)
 
 class TagSelector:
@@ -431,6 +483,7 @@ class TagSelector:
         resolved_groups = []
         for g in groups:
             clean_g = g.strip()
+            # Fix: Resolve variables inside tags (e.g. <[$char]> -> <[rin]>)
             if clean_g.startswith('$') and clean_g[1:] in self.variables:
                 val = self.variables[clean_g[1:]]
                 resolved_groups.append(val)
@@ -442,11 +495,15 @@ class TagSelector:
         any_groups = [{y.strip() for y in x.lower().split('|')} for x in resolved_groups if '|' in x]
 
         candidates = []
-        for title, tag_set in tags.items():
-            if not isinstance(tag_set, (set, list)):
-                continue 
-            if isinstance(tag_set, list):
-                tag_set = set(tag_set)
+        
+        # Fix: Better Dictionary Handling for Umi Cards
+        for title, entry_data in tags.items():
+            if isinstance(entry_data, dict):
+                tag_set = set(entry_data.get('tags', []))
+            elif isinstance(entry_data, (list, set)):
+                tag_set = set(entry_data)
+            else:
+                continue
             
             if not pos_groups.issubset(tag_set):
                 continue
@@ -1130,7 +1187,6 @@ class UmiAIWildcardNode:
 
     def process(self, **kwargs):
         # 1. EXTRACT INPUTS SAFELY (CRASH PROOFING)
-        # Using .get_val to safely retrieve arguments or default if missing/wrong type
         text = self.get_val(kwargs, "text", "", str)
         seed = self.get_val(kwargs, "seed", 0, int)
         
@@ -1268,7 +1324,7 @@ async def get_wildcards(request):
     # 1. Get Wildcards
     wildcards = sorted(list(loader.files_index))
     
-    # 2. Get LoRAs (New functionality)
+    # 2. Get LoRAs
     loras = folder_paths.get_filename_list("loras")
     loras = sorted(loras) if loras else []
 
@@ -1281,10 +1337,16 @@ async def get_wildcards(request):
 async def refresh_wildcards(request):
     """Refreshes the global cache and returns the new list."""
     GLOBAL_CACHE.clear()
+    
+    # Fix: Nuke the Index Cache so it rebuilds next time
+    GLOBAL_INDEX['built'] = False 
+    GLOBAL_INDEX['files'] = set()
+    GLOBAL_INDEX['entries'] = {}
+    
     wildcards_path = os.path.join(os.path.dirname(__file__), "wildcards")
     options = {'ignore_paths': True, 'verbose': False}
     loader = TagLoader(wildcards_path, options)
-    loader.build_index() # Rebuild index immediately
+    loader.build_index() # Rebuild immediately
     
     wildcards = sorted(list(loader.files_index))
     loras = folder_paths.get_filename_list("loras")

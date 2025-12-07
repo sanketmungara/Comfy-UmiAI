@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 
 // =============================================================================
-// PART 1: AUTOCOMPLETE LOGIC (Enhanced with Fuzzy Search)
+// PART 1: AUTOCOMPLETE LOGIC (Enhanced with Fuzzy Search & Context Awareness)
 // =============================================================================
 
 class AutoCompletePopup {
@@ -125,7 +125,7 @@ class AutoCompletePopup {
 }
 
 // =============================================================================
-// PART 2: THE PROFESSIONAL USER GUIDE UI (FULL VERSION)
+// PART 2: THE PROFESSIONAL USER GUIDE UI
 // =============================================================================
 
 const HELP_STYLES = `
@@ -244,8 +244,8 @@ const HELP_HTML = `
                     <tr><td><span class="umi-code">{a|b}</span></td><td>Random choice.</td></tr>
                     <tr><td><span class="umi-code">{a|b} ... {1|2}</span></td><td><strong>Sync:</strong> 2 lists of equal size will always match indices.</td></tr>
                     <tr><td><span class="umi-code">{2$$a|b|c}</span></td><td>Pick 2 unique.</td></tr>
-                    <tr><td><span class="umi-code">__*__</span></td><td><strong>Wildcard Wildcard:</strong> Pick from ANY file.</td></tr>
-                    <tr><td><span class="umi-code">__folder/*__</span></td><td>Pick any file in 'folder'.</td></tr>
+                    <tr><td><span class="umi-code">__*__</span></td><td><strong>Wildcard:</strong> Pick from ANY file.</td></tr>
+                    <tr><td><span class="umi-code">&lt;[Tag]&gt;</span></td><td><strong>Tag Aggregation:</strong> Pick from any entry with this tag.</td></tr>
                 </table>
             </div>
             <div>
@@ -293,24 +293,16 @@ A photo of a cat, $style</div>
                 </div>
             </div>
         </div>
-
-        <div class="callout callout-success">
-            <strong>✨ Auto-Detection (Standard & Z-Image):</strong><br>
-            The node automatically inspects the LoRA file.<br>
-            • If it is a <strong>Standard LoRA</strong>, it loads normally.<br>
-            • If it detects <strong>Z-Image keys</strong> (unfused QKV), it automatically applies the QKV fusion patch.<br>
-            You don't need to do anything special—just use the tag!
-        </div>
     </div>
     
     <div class="umi-section">
         <h3>📂 Creating & Using Wildcards</h3>
-        <p>You can create your own lists in the <code>wildcards/</code> folder. The system now supports <strong>Hot-Swapping</strong> and <strong>Recursive Scanning</strong> (files in subfolders work!).</p>
+        <p>You can create your own lists in the <code>wildcards/</code> folder or <code>models/wildcards/</code>.</p>
         
         <div class="umi-grid-2">
             <div>
                 <h4>1. Simple Text Lists (.txt)</h4>
-                <p>Create a file named <code>wildcards/colors.txt</code>:</p>
+                <p>Create a file named <code>colors.txt</code>:</p>
                 <div class="umi-block">Red
 Blue
 Green</div>
@@ -319,150 +311,13 @@ Green</div>
             </div>
             
             <div>
-                <h4>2. Advanced Tag Lists (.yaml)</h4>
-                <p>The node <strong>auto-detects</strong> two formats:</p>
-                <div class="umi-block">// Format A: Umi (Entry-Based)
-Crimson:
-  Prompts: ["red fire"]
-  Tags: [fire]
-
-// Format B: Nested (Folder-Like)
-clothes:
-  bottoms:
-    - jeans
-    - skirt</div>
-                <p style="font-size:12px">Usage: <code>&lt;[Crimson]&gt;</code> or <code>__clothes/bottoms__</code></p>
+                <h4>2. Umi YAML Format (Tag Aggregation)</h4>
+                <div class="umi-block">Silk:
+  Prompts: ["white hair archer"]
+  Tags: [Demihuman]</div>
+                <p style="font-size:12px">Usage: <code>&lt;[Demihuman]&gt;</code> (Picks any entry with 'Demihuman' tag) or <code>&lt;[Silk]&gt;</code>.</p>
             </div>
         </div>
-
-        <div class="callout callout-success">
-            <strong>🌟 New: "Wildcard Wildcards" (Globbing)</strong><br>
-            Use <code>*</code> to pick from multiple files at once. This works on TXT, CSV, and YAML keys!<br>
-            • <code>__*__</code> : Pick a random line from <strong>EVERY</strong> file found.<br>
-            • <code>__style/*__</code> : Pick from any file inside the "style" folder (or starting with "style").<br>
-            • <code>__char/*/outfit__</code> : Great for nested YAMLs (e.g., char/rin/outfit).
-        </div>
-        
-        <div style="margin-top: 20px;">
-            <h4>3. CSV Data Injection (Correlated Variables)</h4>
-            <p>Use <code>.csv</code> files to link multiple attributes together (e.g. Ensuring a "Paladin" always has "Plate Armor"). The node picks a <strong>single random row</strong> and maps the headers to variables.</p>
-            
-            <div class="umi-block">// 1. Trigger the file to lock in a random row
-__card.csv__
-
-// 2. Use the headers as variables
-A fantasy $name holding a $weapon, wearing $armor.</div>
-        </div>
-    </div>
-
-    <div class="umi-section">
-        <h3>💾 Variables & Persistence</h3>
-        <p>Define a choice once, store it, and reuse it. This ensures character consistency across a prompt.</p>
-        
-        <div class="umi-block">// 1. Assignment (Hidden from final output)
-$hair={Blonde|Red|Neon Pink}
-
-// 2. Usage (Replaces with the stored value)
-A photo of a woman with $hair hair. The wind blows her $hair hair.</div>
-
-        <div class="callout callout-info">
-            <strong>📸 The "Snapshot" Rule:</strong><br>
-            Variables are resolved <strong>ONCE</strong> when defined. They are static snapshots.<br>
-            Wildcards (<code>__file__</code>) are resolved <strong>EVERY TIME</strong> they are used.<br>
-            Use variables for consistency (Eyes/Hair). Use Wildcards for chaos (Backgrounds).
-        </div>
-    </div>
-
-    <div class="umi-section">
-        <h3>🔀 Conditional Logic</h3>
-        <p>Inject text only if a specific keyword exists in the resolved prompt.</p>
-        
-        <div class="umi-block">// Syntax: [if Keyword : True Text | False Text]
-
-$class={Knight|Cyberpunk}
-
-[if Knight : holding a sword | holding a laser gun]</div>
-
-        <div class="callout callout-warn">
-            <strong>⚠️ CRITICAL SYNTAX RULE: The "Pipe Conflict"</strong><br>
-            Never use the pipe <code>|</code> symbol inside a variable definition.<br>
-            ❌ <code>$var = { [if A : x | y] }</code> (Breaks the parser)<br>
-            ✅ <code>$var = { [if A : x] [if B : y] }</code> (Split logic works perfectly!)
-        </div>
-    </div>
-
-    <div class="umi-section">
-        <h3>🎨 Danbooru Character Expander</h3>
-        <p>Type <code>char:character_name</code> to automatically fetch visual tags (hair, eyes, outfit) from Danbooru.</p>
-        
-        <table class="umi-table">
-            <tr><th>Setting</th><th>Description</th></tr>
-            <tr><td><strong>Threshold</strong></td><td>Strictness. High (0.8) = Core features only. Low (0.3) = Outfits/Details.</td></tr>
-            <tr><td><strong>Max Tags</strong></td><td>Limit how many descriptive tags are returned.</td></tr>
-        </table>
-    </div>
-
-    <div class="umi-section">
-        <h3>🧠 Integrated LLM (Prompt Naturalizer)</h3>
-        <p>Turn simple lists of tags into rich, descriptive, and natural sentences using a local LLM.</p>
-        
-        <div class="umi-grid-2">
-            <div style="background: #151515; padding: 10px; border-radius: 6px;">
-                <strong>1. Setup</strong><br>
-                <span style="font-size:12px; color:#888;">Select <strong>"Download Recommended"</strong> in the <code>llm_model</code> widget. Wait for the download (auto-saves to <code>models/llm</code>).</span>
-            </div>
-            <div style="background: #151515; padding: 10px; border-radius: 6px;">
-                <strong>2. Usage</strong><br>
-                <span style="font-size:12px; color:#888;">Set <code>llm_prompt_enhancer</code> to <strong>"Yes"</strong>.<br>Input: "1girl, solo, beach"<br>Output: "A stunning close-up of a lone woman standing on a sunlit beach..."</span>
-            </div>
-        </div>
-        <p style="font-size:12px; color:#888;">*Note: This feature automatically protects your LoRA tags &lt;...&gt; from being rewritten by the LLM.</p>
-    </div>
-
-    <div class="umi-section" style="margin-bottom: 0;">
-        <h3>🚀 Production Workflows</h3>
-        <p>Copy-paste these blocks to test the full power of the node.</p>
-        
-        <details>
-            <summary>🧪 The RPG Generator (Advanced)</summary>
-            <div class="umi-block">// 1. Synchronized Arrays (Deterministic Randomness)
-// Since both have 2 options, they will always pick the same index (e.g., 1 & 1 or 2 & 2)
-$class = {Paladin|Necromancer}
-$weapon = {hammer|scythe}
-$magic = {holy golden light|dark purple mist}
-
-// 2. Formatting & Logic
-// We use .title to make it look nice. We add .break to the ID to allow underscores.
-Character: $class
-Weapon Display: $class.title $weapon.title
-Filename ID: $class.break_$weapon
-
-// 3. Effect
-Effect: glowing with $magic</div>
-        </details>
-        
-        <details>
-             <summary>🧪 The "Context-Aware" LoRA Switcher</summary>
-             <div class="umi-block">$style = {Anime|Photorealistic}
-
-// Logic: Load different LoRAs based on the random style
-// Note: We use split [if] blocks to avoid the pipe syntax trap inside variables!
-$lora_setup = { [if Anime : <lora:AnimeOutline:1.0>] [if Photorealistic : <lora:SkinTexture:0.8>] }
-
-$lora_setup
-A $style portrait of a girl.</div>
-        </details>
-        
-        <details>
-             <summary>🧪 Scoped Negatives & Post-Processing</summary>
-             <div class="umi-block">// 1. Scoped Negatives:
-// This negative prompt ONLY applies if this specific line is chosen.
-A red car on a street --neg: blue, green, pedestrians
-
-// 2. Formatting Cleaners:
-// Randomize the list order and remove empty commas
-[clean: [shuffle: 1girl, solo, __optional_hat__, __optional_glasses__]]</div>
-        </details>
     </div>
 `;
 
@@ -482,7 +337,7 @@ function showHelpModal() {
         <div class="umi-help-content">
             <div class="umi-help-header">
                 <div>
-                    <h2>📘 UmiAI Reference Manual <span class="version">v1.3</span></h2>
+                    <h2>📘 UmiAI Reference Manual <span class="version">v1.4</span></h2>
                 </div>
                 <button class="umi-help-close" onclick="this.closest('.umi-help-modal').remove()">CLOSE</button>
             </div>
@@ -509,12 +364,6 @@ function getFuzzyMatches(query, allItems) {
     const lowerQuery = query.toLowerCase();
     
     // Score items
-    // Score breakdown:
-    // 100: Exact Match
-    // 75:  Starts With
-    // 50:  Contains
-    // 10+: Fuzzy Subsequence (higher is better)
-    
     const scored = allItems.map(item => {
         const lowerItem = item.toLowerCase();
         
@@ -528,19 +377,17 @@ function getFuzzyMatches(query, allItems) {
         if (lowerItem.includes(lowerQuery)) return { item, score: 50 };
         
         // 4. Fuzzy Sequence Check
-        // e.g. "trp" matches "TRoPical"
         let qIdx = 0;
         let fuzzyScore = 0;
         for (let i = 0; i < lowerItem.length; i++) {
             if (lowerItem[i] === lowerQuery[qIdx]) {
                 qIdx++;
-                fuzzyScore += (100 - i); // Earlier matches are better
+                fuzzyScore += (100 - i); 
             }
             if (qIdx === lowerQuery.length) break;
         }
         
         if (qIdx === lowerQuery.length) {
-            // Found all characters in order
             return { item, score: 10 + (fuzzyScore / 100) };
         }
         
@@ -568,7 +415,6 @@ app.registerExtension({
                 if (resp.ok) {
                     const data = await resp.json();
                     
-                    // Handle both old array format and new dict format for backward compatibility
                     if (Array.isArray(data)) {
                         this.wildcards = data;
                         this.loras = [];
@@ -666,7 +512,7 @@ app.registerExtension({
                 this.widgets.forEach(w => {
                     if (llmWidgets.includes(w.name)) {
                         w.origType = w.type;
-                        w.origComputeSize = w.computeSize;
+                        w.origComputeSize = w.origComputeSize;
                     }
                 });
 
@@ -742,7 +588,10 @@ app.registerExtension({
                 const beforeCursor = text.substring(0, cursor);
 
                 // Regex Config
-                const matchFile = beforeCursor.match(/__([\w\/\-\s]*)$/); // Added \s to allow spaces while typing
+                // UPDATED: Now matches __ OR <[
+                // Group 1: Opener (__ or <[)
+                // Group 2: The query string
+                const matchFile = beforeCursor.match(/(__|<\[)([\w\/\-\s]*)$/); 
                 const matchLora = beforeCursor.match(/<lora:([^>]*)$/);
 
                 if (!ext) return;
@@ -751,18 +600,20 @@ app.registerExtension({
                 let triggerType = ""; 
                 let matchIndex = 0;
                 let query = "";
+                let opener = "";
 
                 // -- Wildcard Logic --
                 if (matchFile) {
                     triggerType = "file";
-                    query = matchFile[1]; // Keep case for fuzzy
+                    opener = matchFile[1]; // Capture the opener (__ or <[)
+                    query = matchFile[2]; 
                     matchIndex = matchFile.index;
                     
                     // FUZZY SEARCH IMPLEMENTATION
                     options = getFuzzyMatches(query, ext.wildcards);
 
                 } 
-                // -- LoRA Logic (NOW FIXED WITH FUZZY SEARCH) --
+                // -- LoRA Logic --
                 else if (matchLora) {
                     triggerType = "lora";
                     query = matchLora[1];
@@ -778,8 +629,19 @@ app.registerExtension({
                     
                     ext.popup.show(rect.left + 20, topOffset, options, (selected) => {
                         let completion = "";
-                        if (triggerType === "file") completion = `__${selected}__`;
-                        else if (triggerType === "lora") completion = `<lora:${selected}:1.0>`;
+                        
+                        // Smart Completion based on Opener
+                        if (triggerType === "file") {
+                            // If started with <[, close with ]>
+                            if (opener === "<[") {
+                                completion = `<[${selected}]>`;
+                            } else {
+                                completion = `__${selected}__`;
+                            }
+                        }
+                        else if (triggerType === "lora") {
+                            completion = `<lora:${selected}:1.0>`;
+                        }
 
                         const prefix = text.substring(0, matchIndex);
                         const suffix = text.substring(cursor);
