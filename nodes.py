@@ -23,7 +23,8 @@ from aiohttp import web
 # ==============================================================================
 GLOBAL_CACHE = {}
 # Persist the card index across generations
-GLOBAL_INDEX = {'built': False, 'files': set(), 'entries': {}} 
+# 'tags' added to cache to store Umi-format tags
+GLOBAL_INDEX = {'built': False, 'files': set(), 'entries': {}, 'tags': set()} 
 
 # LRU Cache for LoRAs to prevent disk thrashing
 LORA_MEMORY_CACHE = {}
@@ -179,7 +180,8 @@ class TagLoader:
 
         self.loaded_tags = {}
         self.yaml_entries = {}
-        self.files_index = set() 
+        self.files_index = set()
+        self.umi_tags = set()  # Added: Store tags extracted from Umi YAMLs
         self.index_built = False
         self.ignore_paths = options.get('ignore_paths', True)
         self.verbose = options.get('verbose', False)
@@ -222,6 +224,7 @@ class TagLoader:
         if GLOBAL_INDEX['built']:
             self.files_index = GLOBAL_INDEX['files']
             self.yaml_entries = GLOBAL_INDEX['entries']
+            self.umi_tags = GLOBAL_INDEX.get('tags', set()) # Load tags from global cache
             self.index_built = True
             return
 
@@ -230,6 +233,7 @@ class TagLoader:
 
         new_index = set()
         new_entries = {}
+        new_tags = set()
         
         # 1. Add Files (TXT/CSV)
         for key in self.txt_lookup.keys():
@@ -254,6 +258,9 @@ class TagLoader:
                                  processed = self.process_yaml_entry(k, v)
                                  if processed['tags']:
                                      new_entries[k.lower()] = processed
+                                     # Collect tags for autocomplete
+                                     for t in processed['tags']:
+                                         new_tags.add(t)
                     else:
                         flat_data = self.flatten_hierarchical_yaml(data)
                         for k in flat_data.keys():
@@ -265,11 +272,13 @@ class TagLoader:
         # Save to Instance
         self.files_index = new_index
         self.yaml_entries = new_entries
+        self.umi_tags = new_tags
         self.index_built = True
         
         # Save to Global Cache (Persist for next run)
         GLOBAL_INDEX['files'] = new_index
         GLOBAL_INDEX['entries'] = new_entries
+        GLOBAL_INDEX['tags'] = new_tags
         GLOBAL_INDEX['built'] = True
 
     def load_globals(self):
@@ -1517,16 +1526,18 @@ async def get_wildcards(request):
     loader = TagLoader(all_paths, options)
     loader.build_index()
     
-    # 1. Get Wildcards
-    wildcards = sorted(list(loader.files_index))
+    # 1. Get Wildcards and Tags (FIX: Combine for autocomplete)
+    # Using set to avoid duplicates between file names and tags if any exist
+    combined_list = sorted(list(loader.files_index | loader.umi_tags))
     
     # 2. Get LoRAs
     loras = folder_paths.get_filename_list("loras")
     loras = sorted(loras) if loras else []
 
+    # FIX: Return merged list as 'wildcards' so frontend sees them
     return web.json_response({
-        "wildcards": wildcards,
-        "loras": loras
+        "wildcards": combined_list,
+        "loras": loras,
     })
 
 @server.PromptServer.instance.routes.post("/umiapp/refresh")
@@ -1538,19 +1549,22 @@ async def refresh_wildcards(request):
     GLOBAL_INDEX['built'] = False 
     GLOBAL_INDEX['files'] = set()
     GLOBAL_INDEX['entries'] = {}
+    GLOBAL_INDEX['tags'] = set()
     
     all_paths = get_all_wildcard_paths()
     options = {'ignore_paths': True, 'verbose': False}
     loader = TagLoader(all_paths, options)
     loader.build_index() 
     
-    wildcards = sorted(list(loader.files_index))
+    # FIX: Merge lists here as well
+    combined_list = sorted(list(loader.files_index | loader.umi_tags))
+    
     loras = folder_paths.get_filename_list("loras")
     loras = sorted(loras) if loras else []
     
     return web.json_response({
         "status": "success", 
-        "count": len(wildcards),
-        "wildcards": wildcards,
+        "count": len(combined_list),
+        "wildcards": combined_list,
         "loras": loras
     })
