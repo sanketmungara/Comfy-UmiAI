@@ -2,9 +2,9 @@
 
 [![Join Discord](https://img.shields.io/badge/Discord-Join%20Umi%20AI-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/9K7j7DTfG2)
 
-**A "Logic Engine" for ComfyUI Prompts.**
+**The "Multimodal Brain" for ComfyUI Prompts.**
 
-UmiAI transforms static prompts into dynamic, context-aware workflows. It introduces **Persistent Variables**, **Advanced Boolean Logic**, **Native LoRA Loading**, and **External Data Fetching** directly into your prompt text box.
+UmiAI transforms static prompts into dynamic, context-aware workflows. It combines **Advanced Logic**, **Persistent Variables**, **Native LoRA Loading**, and now **Local Vision & LLM Intelligence** directly into your prompt text box.
 
 > 🚨 **CRITICAL UPDATE NOTICE** 🚨
 > 
@@ -17,15 +17,15 @@ UmiAI transforms static prompts into dynamic, context-aware workflows. It introd
 
 ## ✨ Key Features
 
-* **🔋 Native LoRA Loading:** Type `<lora:filename:1.0>` directly in the text. The node patches the model internally/ No external LoRA Loader nodes required.
-* **🧠 Integrated Local LLM:** Turn simple tag lists into rich natural language descriptions using local models (Qwen/Llama3). Runs entirely on CPU to save VRAM.
+* **👁️ Vision-to-Text (New):** Connect an image and use `[VISION]` to auto-caption it using local models like **JoyCaption (Alpha 2)** or **Llava**.
+* **🧠 Dual LLM Pipeline:** Chain a Vision model (to see) with a Text Refiner (to write) for high-quality, natural language prompt generation.
+* **🔋 Native LoRA Loading:** Type `<lora:filename:1.0>` directly in the text. The node patches the model internally. No external LoRA Loader nodes required.
+* **🔄 Auto-Updater:** Includes a built-in switch to auto-update and patch `llama-cpp-python` for CUDA compatibility.
 * **🔀 Advanced Logic Engine:** Full support for `AND`, `OR`, `NOT`, `XOR`, and `( )` grouping. Use it to filter wildcards or conditionally change prompt text.
-* **🧠 Persistent Variables:** Define a choice once (`$hair={Red|Blue}`) and reuse it (`$hair`) anywhere to ensure consistency.
+* **💲 Persistent Variables:** Define a choice once (`$hair={Red|Blue}`) and reuse it (`$hair`) anywhere to ensure consistency.
 * **🛠️ Z-Image Support:** Automatically detects and fixes Z-Image format LoRAs (QKV Fusion) on the fly.
-* **🌍 Global Presets:** Automatically load variables from `wildcards/globals.yaml` into *every* prompt.
 * **🎨 Danbooru Integration:** Type `char:name` to automatically fetch visual tags from Danbooru.
 * **📏 Resolution Control:** Set `@@width=1024@@` inside your prompt to control image size contextually.
-* **📊 CSV Data Injection:** Load spreadsheet data (.csv) and map columns to variables (e.g., $name, $outfit) for complex character handling.
 
 ---
 
@@ -49,26 +49,51 @@ UmiAI transforms static prompts into dynamic, context-aware workflows. It introd
 
 ---
 
-### Updating
+The UmiAI node acts as the "Central Brain". To use all features (LoRA, Vision, Resolution), wire it as follows:
 
-**Node giving you a strange issue after updating? Right click the node and press "Fix Node (recreate)" and it'll repopulate with correct default values**
+1.  **Model & CLIP (Required for LoRA):**
+    * Connect **Checkpoint Loader** &#10142; **UmiAI Node** (Model/Clip Inputs).
+    * Connect **UmiAI Node** (Model/Clip Outputs) &#10142; **KSampler**.
+2.  **Image (Required for Vision):**
+    * Connect an **Image** source (Load Image/VAE Decode) &#10142; **UmiAI Node** (`image` input).
+3.  **Prompts & Resolution:**
+    * **Text Output** &#10142; `CLIP Text Encode` (Positive)
+    * **Negative Output** &#10142; `CLIP Text Encode` (Negative)
+    * **Width/Height** &#10142; `Empty Latent Image`
 
-## 🔌 Wiring Guide (The "Passthrough" Method)
+> **Note:** To let the node control image size (e.g., `@@width=1024@@`), right-click your **Empty Latent Image** node and select **Convert width/height to input**.
 
-The UmiAI node acts as the "Central Brain". You must pass your **Model** and **CLIP** through it so it can apply LoRAs automatically.
+---
 
-### 1. The Main Chain
-* Connect **Checkpoint Loader (Model & CLIP)** &#10142; **UmiAI Node (Inputs)**.
-* Connect **UmiAI Node (Model & CLIP Outputs)** &#10142; **KSampler** or **Text Encode**.
+## 👁️ Vision & LLM Guide
 
-### 2. Prompts & Resolution
-* **Text Output** &#10142; `CLIP Text Encode` (Positive)
-* **Negative Output** &#10142; `CLIP Text Encode` (Negative)
-* **Width/Height** &#10142; `Empty Latent Image`
+UmiAI uses a **Two-Stage Pipeline** to generate prompts. You can use just one stage or both.
 
-> **⚠️ Setting up Resolution Control:**
-> To let the node control image size (e.g., `@@width=1024@@`), right-click your **Empty Latent Image** node and select **Convert width/height to input**, then connect the wires.
-<img width="883" height="194" alt="wvQeZXNUmL" src="https://github.com/user-attachments/assets/f6018158-297b-45a1-9593-2ce751e8cf38" />
+### Stage 1: Vision (The Eye)
+* **Role:** Looks at the input image and describes it.
+* **Models:**
+    * **JoyCaption-Alpha-2:** Best accuracy, currently the SOTA for captioning.
+    * **Llava-v1.5-7b:** Reliable standard vision model.
+* **Usage:**
+    * Connect an image to the node.
+    * Select a `vision_model`.
+    * Type `[VISION]` in your prompt box. The node will replace that tag with the model's description of the image.
+    * *Advanced:* `[VISION: Describe only the clothing]`
+
+### Stage 2: Refiner (The Writer)
+* **Role:** Takes the raw description (or your rough text) and rewrites it into a beautiful prompt.
+* **Models:**
+    * **Qwen2.5-1.5B:** Fast, smart, low VRAM.
+    * **Dolphin-Llama3.1-8B:** Creative, uncensored, follows instructions well.
+    * **Wingless Imp 8B:** Great for creative roleplay descriptions.
+* **Usage:**
+    * Select a `refiner_model`.
+    * Type `[LLM: 1girl, red dress, beach]` in your prompt.
+    * The node will rewrite that simple list into a full paragraph based on your **Custom System Prompt**.
+
+### ⚡ Auto-Download & Update
+* **Model Download:** If you select a "Download:" model in the list, UmiAI will automatically download it from HuggingFace to `models/llm` on the first run.
+* **Library Update:** If you get errors regarding "Vision Projector" or CUDA, toggle the **update_llama_cpp** widget to `True` (Update & Restart) and queue a prompt. The node will attempt to reinstall the correct wheels for your CUDA version.
 
 ---
 
@@ -76,22 +101,23 @@ The UmiAI node acts as the "Central Brain". You must pass your **Model** and **C
 
 | Feature | Syntax | Example |
 | :--- | :--- | :--- |
+| **Vision Tag** | `[VISION]` | `[VISION]` or `[VISION: describe background]` |
+| **LLM Rewrite** | `[LLM: text]` | `[LLM: 1girl, cyberpunk city]` |
 | **Load LoRA** | `<lora:name:str>` | `<lora:pixel_art:0.8>` |
 | **Random Choice** | `{a\|b\|c}` | `{Red\|Blue\|Green}` |
 | **Logic (Prompt)** | `[if Logic : True \| False]` | `[if red AND blue : Purple \| Grey]` |
 | **Logic (Wildcard)**| `__[Logic]__` | `__[fire OR (ice AND magic)]__` |
-| **Operators** | `AND`, `OR`, `NOT`, `XOR` | `[if (A OR B) AND NOT C : ...]` |
 | **Variables** | `$var={opts}` | `$hair={Red\|Blue}` |
-| **Equality Check** | `$var=val` | `[if $hair=Red : Fire Magic]` |
+| **Use Variable** | `$var` | `She has $hair hair` |
 | **Danbooru** | `char:name` | `char:tifa_lockhart` |
 | **Set Size** | `@@w=X, h=Y@@` | `@@width=1024, height=1536@@` |
-| **Comments** | `//` or `#` | `// This is a comment` |
+| **Negative (Local)**| `**text**` | `A nice cat **bad quality, blurry**` |
 
 ---
 
 ## 🧠 Advanced Boolean Logic
 
-UmiAI now features a unified logic engine that works in both your **Prompts** and your **Wildcard Filters**.
+UmiAI features a unified logic engine that works in both your **Prompts** and your **Wildcard Filters**.
 
 ### Supported Operators
 * **AND**: Both conditions must be true.
@@ -110,12 +136,20 @@ You can change the text of your prompt based on other words present in the promp
 // Variable check: If $char is defined as 'robot', add oil.
 [if $char=robot : leaking oil | sweating]
 
+### 2. Logic in Wildcards (`__[ ... ]__`)
+Search your Wildcards and YAML cards (Global Index) for entries that match specific tags.
+
+Plaintext
+
+// Find a wildcard that has the tag "dress" but NOT "red"
+__[dress AND NOT red]__
+
+// Variable check: If $char is defined as 'robot', add oil.
+[if $char=robot : leaking oil | sweating]
+
 // Complex grouping
 [if (scifi OR cyber) AND NOT space : futuristic city | nature landscape]
 ```
-
-### 2. Logic in Wildcards (`__[ ... ]__`)
-You can also search your Wildcards and YAML cards (Global Index) for entries that match specific tags. This replaces the old folder-based lookup.
 
 ---
 

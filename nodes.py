@@ -7,60 +7,190 @@ import json
 import csv
 import requests
 import fnmatch
-from collections import Counter
+import gc 
+import sys
+import subprocess
+from collections import Counter, OrderedDict
 import folder_paths
 import comfy.sd
 import comfy.utils
 import torch 
 from safetensors import safe_open 
 
+# New imports for Vision support
+import base64
+import io
+import numpy as np
+from PIL import Image
+
 # API Imports
 import server
 from aiohttp import web
 
 # ==============================================================================
-# GLOBAL CACHE
+# GLOBAL CACHE & SETUP
 # ==============================================================================
 GLOBAL_CACHE = {}
-# Persist the card index across generations
-# 'tags' added to cache to store Umi-format tags
 GLOBAL_INDEX = {'built': False, 'files': set(), 'entries': {}, 'tags': set()} 
 
-# LRU Cache for LoRAs to prevent disk thrashing
-LORA_MEMORY_CACHE = {}
-MAX_LORA_CACHE_SIZE = 20
+# LRU CACHE
+LORA_MEMORY_CACHE = OrderedDict()
+
+# REGISTER LLM FOLDER
+folder_paths.add_model_folder_path("llm", os.path.join(folder_paths.models_dir, "llm"))
 
 # ==============================================================================
 # OPTIONAL IMPORTS (LLM & Downloader)
 # ==============================================================================
+LLAMA_CPP_AVAILABLE = False
 try:
     from llama_cpp import Llama
+    from llama_cpp.llama_chat_format import Llava15ChatHandler
     LLAMA_CPP_AVAILABLE = True
 except ImportError:
-    LLAMA_CPP_AVAILABLE = False
+    pass
 
+HF_HUB_AVAILABLE = False
 try:
     from huggingface_hub import hf_hub_download
     HF_HUB_AVAILABLE = True
 except ImportError:
-    HF_HUB_AVAILABLE = False
+    pass
+
+# ==============================================================================
+# AUTO-UPDATE LOGIC
+# ==============================================================================
+def perform_library_update():
+    print("\n[UmiAI] STARTING AUTO-UPDATE OF LLAMA-CPP-PYTHON...")
+    
+    # 1. Detect CUDA Version to choose right wheel
+    cuda_ver = ""
+    try:
+        raw_ver = torch.version.cuda
+        if raw_ver:
+            cuda_ver = raw_ver.replace(".", "")
+            print(f"[UmiAI] Detected CUDA Version: {raw_ver}")
+    except:
+        pass
+
+    # 2. Select URL based on CUDA (Defaulting to cu124 for modern ComfyUI)
+    # Most ComfyUI portables are on 12.1 or 12.4
+    extra_url = "https://abetlen.github.io/llama-cpp-python/whl/cu124"
+    
+    if "121" in cuda_ver:
+        extra_url = "https://abetlen.github.io/llama-cpp-python/whl/cu121"
+    elif "118" in cuda_ver or "117" in cuda_ver:
+        extra_url = "https://abetlen.github.io/llama-cpp-python/whl/cu117"
+    elif not cuda_ver:
+        # Fallback for CPU only
+        extra_url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+
+    print(f"[UmiAI] Target Wheel URL: {extra_url}")
+
+    # 3. Construct Pip Command
+    cmd = [
+        sys.executable, "-m", "pip", "install", 
+        "llama-cpp-python", 
+        "--upgrade", "--force-reinstall", "--no-cache-dir", 
+        "--extra-index-url", extra_url
+    ]
+
+    try:
+        subprocess.check_call(cmd)
+        print("\n[UmiAI] UPDATE SUCCESSFUL!")
+        print("[UmiAI] =====================================================")
+        print("[UmiAI] YOU MUST RESTART COMFYUI NOW FOR CHANGES TO TAKE EFFECT.")
+        print("[UmiAI] =====================================================\n")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"\n[UmiAI] UPDATE FAILED: {e}")
+        return False
+
+# ==============================================================================
+# CUSTOM HANDLER FOR JOYCAPTION
+# ==============================================================================
+if LLAMA_CPP_AVAILABLE:
+    class JoyCaptionChatHandler(Llava15ChatHandler):
+        def __init__(self, clip_model_path, verbose=False):
+            super().__init__(clip_model_path=clip_model_path, verbose=verbose)
+
+        def _format_prompt(self, messages, **kwargs):
+            # Strict Llama 3 Template for JoyCaption
+            prompt = ""
+            for message in messages:
+                role = message["role"]
+                content = message["content"]
+                
+                # JoyCaption (Alpha 2) works best without a system prompt interfering
+                if role == "system":
+                    continue 
+                
+                elif role == "user":
+                    prompt += f"<|start_header_id|>user<|end_header_id|>\n\n"
+                    
+                    has_image = False
+                    text_content = ""
+                    
+                    if isinstance(content, list):
+                        for item in content:
+                            if item["type"] == "text":
+                                text_content += item["text"]
+                            elif item["type"] == "image_url":
+                                has_image = True
+                    else:
+                        text_content += str(content)
+                    
+                    prompt += text_content
+                    # JoyCaption expects the image token at the END of the user message
+                    if has_image:
+                        prompt += "\n<image>"
+                        
+                    prompt += "<|eot_id|>"
+                
+                elif role == "assistant":
+                    prompt += f"<|start_header_id|>assistant<|end_header_id|>\n\n{content}<|eot_id|>"
+            
+            prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
+            return prompt
 
 # ==============================================================================
 # CONSTANTS & HELPER FUNCTIONS
 # ==============================================================================
 
 DOWNLOADABLE_MODELS = {
-    "Download: Qwen2.5-1.5B (Fast, Low RAM)": {
+    "Download: JoyCaption-Alpha-2 (Best Accuracy - Requires Update)": {
+        "repo_id": "bartowski/JoyCaption-Alpha-Two-Llama3-GGUF",
+        "filename": "JoyCaption-Alpha-Two-Llama3-Q4_K_M.gguf",
+        "mmproj": "JoyCaption-Alpha-Two-Llama3-mmproj-f16.gguf" 
+    },
+    "Download: Llava-v1.5-7b (Standard Vision - Stable)": {
+        "repo_id": "cjpais/llava-1.5-7b-gguf",
+        "filename": "llava-v1.5-7b-Q4_K.gguf",
+        "mmproj": "llava-v1.5-7b-mmproj-Q4_0.gguf" 
+    },
+    "Download: Qwen2.5-1.5B (Text Refiner - Smart & Fast)": {
         "repo_id": "bartowski/Qwen2.5-Coder-1.5B-Instruct-abliterated-GGUF",
         "filename": "Qwen2.5-Coder-1.5B-Instruct-abliterated-Q4_K_M.gguf"
     },
-    "Download: Dolphin-Llama3.1-8B (Smart, Uncensored)": {
+    "Download: Dolphin-Llama3.1-8B (Text Refiner - Creative)": {
         "repo_id": "bartowski/dolphin-2.9.4-llama3.1-8b-GGUF",
         "filename": "dolphin-2.9.4-llama3.1-8b-Q4_K_M.gguf"
+    },
+    "Download: Wingless Imp 8B (Llama-3 - Creative RP)": {
+        "repo_id": "mradermacher/Wingless_Imp_8B-GGUF",
+        "filename": "Wingless_Imp_8B.Q4_K_M.gguf"
     }
 }
 
 ALL_KEY = 'all_files_index'
+
+def is_valid_image(image_input):
+    """Safe check for image tensor availability."""
+    if image_input is None:
+        return False
+    if isinstance(image_input, torch.Tensor):
+        return True
+    return False
 
 def parse_tag(tag):
     if tag is None:
@@ -102,9 +232,6 @@ def parse_wildcard_range(range_str, num_variants):
         return 1, 1
 
 def process_wildcard_range(tag, lines, rng):
-    """
-    Processes range tags like $$1-3$$ using a specific RNG instance.
-    """
     if not lines:
         return ""
     if tag.startswith('#'):
@@ -134,27 +261,19 @@ def process_wildcard_range(tag, lines, rng):
         return selected
 
 def get_all_wildcard_paths():
-    """
-    Returns a list of all valid wildcard directory paths.
-    """
     paths = set()
-    
-    # 1. Internal Umi Folder
     internal_path = os.path.join(os.path.dirname(__file__), "wildcards")
     if os.path.exists(internal_path):
         paths.add(internal_path)
     
-    # 2. ComfyUI/wildcards (Root)
     root_wildcards = os.path.join(folder_paths.base_path, "wildcards")
     if os.path.exists(root_wildcards):
         paths.add(root_wildcards)
 
-    # 3. ComfyUI/models/wildcards
     models_wildcards = os.path.join(folder_paths.models_dir, "wildcards")
     if os.path.exists(models_wildcards):
         paths.add(models_wildcards)
 
-    # 4. Check for 'wildcards' type in folder_paths (external extensions)
     try:
         ext_paths = folder_paths.get_folder_paths("wildcards")
         if ext_paths:
@@ -172,7 +291,6 @@ def get_all_wildcard_paths():
 
 class TagLoader:
     def __init__(self, wildcard_paths, options):
-        # Allow passing a single string or a list
         if isinstance(wildcard_paths, str):
             self.wildcard_locations = [wildcard_paths]
         else:
@@ -181,12 +299,11 @@ class TagLoader:
         self.loaded_tags = {}
         self.yaml_entries = {}
         self.files_index = set()
-        self.umi_tags = set()  # Added: Store tags extracted from Umi YAMLs
+        self.umi_tags = set()
         self.index_built = False
         self.ignore_paths = options.get('ignore_paths', True)
         self.verbose = options.get('verbose', False)
         
-        # Mappings
         self.txt_lookup = {}
         self.yaml_lookup = {}
         self.csv_lookup = {}
@@ -205,10 +322,7 @@ class TagLoader:
             for root, dirs, files in os.walk(location):
                 for file in files:
                     full_path = os.path.join(root, file)
-                    # Rel path must be relative to the *current* root location being scanned
                     rel_path = os.path.relpath(full_path, location)
-                    
-                    # Normalize slashes for consistency across OS
                     key = os.path.splitext(rel_path)[0].replace(os.sep, '/')
                     
                     name_lower = file.lower()
@@ -220,11 +334,10 @@ class TagLoader:
                         self.csv_lookup[key.lower()] = full_path
 
     def build_index(self):
-        # OPTIMIZATION: Check if we already did this work globally
         if GLOBAL_INDEX['built']:
             self.files_index = GLOBAL_INDEX['files']
             self.yaml_entries = GLOBAL_INDEX['entries']
-            self.umi_tags = GLOBAL_INDEX.get('tags', set()) # Load tags from global cache
+            self.umi_tags = GLOBAL_INDEX.get('tags', set())
             self.index_built = True
             return
 
@@ -235,13 +348,11 @@ class TagLoader:
         new_entries = {}
         new_tags = set()
         
-        # 1. Add Files (TXT/CSV)
         for key in self.txt_lookup.keys():
             new_index.add(key)
         for key in self.csv_lookup.keys():
             new_index.add(key)
 
-        # 2. Add YAML Keys
         for file_key, full_path in self.yaml_lookup.items():
             if file_key == 'globals':
                 continue
@@ -249,16 +360,13 @@ class TagLoader:
                 with open(full_path, encoding="utf8") as f:
                     data = yaml.safe_load(f)
                     
-                    # Fix: Immediate population of entries for Umi format
                     if self.is_umi_format(data):
                          for k, v in data.items():
                              new_index.add(k)
-                             # Store card data
                              if isinstance(v, dict):
                                  processed = self.process_yaml_entry(k, v)
                                  if processed['tags']:
                                      new_entries[k.lower()] = processed
-                                     # Collect tags for autocomplete
                                      for t in processed['tags']:
                                          new_tags.add(t)
                     else:
@@ -269,22 +377,18 @@ class TagLoader:
             except Exception as e:
                 pass
 
-        # Save to Instance
         self.files_index = new_index
         self.yaml_entries = new_entries
         self.umi_tags = new_tags
         self.index_built = True
         
-        # Save to Global Cache (Persist for next run)
         GLOBAL_INDEX['files'] = new_index
         GLOBAL_INDEX['entries'] = new_entries
         GLOBAL_INDEX['tags'] = new_tags
         GLOBAL_INDEX['built'] = True
 
     def load_globals(self):
-        """Loads globals.yaml from ALL detected paths and merges them."""
         merged_globals = {}
-        
         for location in self.wildcard_locations:
             global_path = os.path.join(location, 'globals.yaml')
             if os.path.exists(global_path):
@@ -292,11 +396,9 @@ class TagLoader:
                     with open(global_path, 'r', encoding='utf-8') as f:
                         data = yaml.safe_load(f)
                         if isinstance(data, dict):
-                            # Update dictionary (later paths overwrite earlier ones)
                             merged_globals.update({str(k): str(v) for k, v in data.items()})
                 except Exception as e:
                     print(f"[UmiAI] Error loading globals.yaml at {global_path}: {e}")
-                    
         return merged_globals
 
     def process_yaml_entry(self, title, entry_data):
@@ -343,14 +445,12 @@ class TagLoader:
         
         lower_tag = requested_tag.lower()
         
-        # 1. Try TXT files
         if lower_tag in self.txt_lookup:
             with open(self.txt_lookup[lower_tag], encoding="utf8") as f:
                 lines = read_file_lines(f)
                 GLOBAL_CACHE[requested_tag] = lines
                 return lines
         
-        # 2. Try CSV files
         if lower_tag in self.csv_lookup:
             with open(self.csv_lookup[lower_tag], 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
@@ -358,7 +458,6 @@ class TagLoader:
                 GLOBAL_CACHE[requested_tag] = rows
                 return rows
 
-        # 3. YAML Handling (Branching Path)
         parts = lower_tag.split('/')
         found_file = None
         key_suffix = ""
@@ -380,7 +479,6 @@ class TagLoader:
                     data = yaml.safe_load(file)
                     
                     if self.is_umi_format(data):
-                        # Populate global index if not already
                         for title, entry in data.items():
                             if isinstance(entry, dict):
                                 processed = self.process_yaml_entry(title, entry)
@@ -432,7 +530,6 @@ class TagSelector:
         self.verbose = options.get('verbose', False)
         self.global_seed = options.get('seed', 0)
         
-        # FIX: Use isolated RNG to prevent contaminating global random state
         self.rng = random.Random(self.global_seed)
         
         self.seeded_values = {}
@@ -463,58 +560,6 @@ class TagSelector:
                 self.scoped_negatives.append(negative)
             return positive
         return text
-
-    def evaluate_criteria(self, criteria_str, candidate_tags):
-        """
-        Evaluates a logic string (e.g. "red OR (blue AND NOT green)") 
-        against a set/list of candidate tags.
-        """
-        clean_criteria = criteria_str.replace(',', ' AND ')
-        clean_criteria = re.sub(r'(^|\s)--', r' NOT ', clean_criteria)
-        
-        ops = {'AND': 'and', 'OR': 'or', 'NOT': 'not', 'XOR': '!='}
-        tokens = re.split(r'(\(|\)|\bAND\b|\bOR\b|\bNOT\b|\bXOR\b)', clean_criteria, flags=re.IGNORECASE)
-        
-        expression = []
-        candidate_context = " ".join(candidate_tags).lower()
-
-        for token in tokens:
-            token = token.strip()
-            if not token: continue
-            
-            upper_token = token.upper()
-            if upper_token in ops:
-                expression.append(ops[upper_token])
-            elif token in ('(', ')'):
-                expression.append(token)
-            else:
-                if '=' in token:
-                    left, right = token.split('=', 1)
-                    left = left.strip()
-                    right = right.strip()
-                    
-                    if left.startswith('$') and left[1:] in self.variables:
-                        left_val = str(self.variables[left[1:]]).lower()
-                        expression.append(str(left_val == right.lower()))
-                    else:
-                         expression.append(str(left.lower() == right.lower()))
-                         
-                elif token.startswith('$') and token[1:] in self.variables:
-                    token_val = str(self.variables[token[1:]])
-                    exists = token_val.lower() in candidate_context
-                    expression.append(str(exists))
-                
-                else:
-                    clean_token = token.replace('[','').replace(']','').strip()
-                    exists = clean_token.lower() in candidate_context
-                    expression.append(str(exists))
-
-        full_expression = " ".join(expression)
-        try:
-            # Restricted eval for safety
-            return eval(full_expression, {"__builtins__": None}, {})
-        except Exception:
-            return criteria_str.lower() in candidate_context
 
     def get_tag_choice(self, parsed_tag, tags):
         if isinstance(tags, list) and len(tags) > 0 and isinstance(tags[0], dict):
@@ -590,7 +635,6 @@ class TagSelector:
         resolved_groups = []
         for g in groups:
             clean_g = g.strip()
-            # Fix: Resolve variables inside tags (e.g. <[$char]> -> <[rin]>)
             if clean_g.startswith('$') and clean_g[1:] in self.variables:
                 val = self.variables[clean_g[1:]]
                 resolved_groups.append(val)
@@ -645,7 +689,6 @@ class TagSelector:
         self.previously_selected_tags[tag] += 1
         parsed_tag = parse_tag(tag)
         
-        # --- GLOB MATCHING ---
         if '*' in parsed_tag or '?' in parsed_tag:
             matches = self.tag_loader.get_glob_matches(parsed_tag)
             if matches:
@@ -715,6 +758,101 @@ class TagSelector:
                 else:
                     suffixes.append(s_str)
         return {'prefixes': prefixes, 'suffixes': suffixes, 'neg_prefixes': neg_p, 'neg_suffixes': neg_s}
+
+# ==============================================================================
+# VISION & LLM REPLACERS
+# ==============================================================================
+class VisionReplacer:
+    def __init__(self, node_instance, vision_model, refiner_model, vision_temp, refiner_temp, llm_tokens, image_input):
+        self.node = node_instance
+        self.vision_model = vision_model
+        self.refiner_model = refiner_model
+        self.vision_temp = vision_temp
+        self.refiner_temp = refiner_temp
+        self.llm_tokens = llm_tokens
+        self.image_input = image_input
+        self.regex = re.compile(r'\[VISION(?::\s*(.*?))?\]', re.IGNORECASE)
+
+    def replace(self, prompt):
+        def _process_vision_tag(match):
+            print("[UmiAI] Found Vision Tag. Processing...")
+            
+            if self.vision_model == "None":
+                return "[VISION_ERROR: No Vision Model Selected]"
+            
+            # SAFE CHECK: prevents ambiguous tensor error
+            if not is_valid_image(self.image_input):
+                return "[VISION_ERROR: No Image Connected]"
+
+            custom_instruction = match.group(1)
+            if not custom_instruction:
+                custom_instruction = ""
+
+            result = self.node.run_llm_naturalizer(
+                text="", 
+                model_choice=self.vision_model,
+                refiner_choice=self.refiner_model,
+                vision_temperature=self.vision_temp,
+                refiner_temperature=self.refiner_temp,
+                max_tokens=self.llm_tokens,
+                custom_prompt=custom_instruction,
+                image_input=self.image_input
+            )
+            
+            if not result:
+                return "[VISION_ERROR: Empty Output from LLM]"
+            
+            if result.startswith("[Error:") or result.startswith("[VISION_ERROR:"):
+                return result
+                
+            return result
+
+        if self.regex.search(prompt):
+            return self.regex.sub(_process_vision_tag, prompt)
+        return prompt
+
+class LLMReplacer:
+    def __init__(self, node_instance, refiner_model, refiner_temp, llm_tokens, custom_prompt):
+        self.node = node_instance
+        self.refiner_model = refiner_model
+        self.refiner_temp = refiner_temp
+        self.llm_tokens = llm_tokens
+        # UPDATED DEFAULT PROMPT
+        self.custom_prompt = custom_prompt if custom_prompt else "You are an AI image prompt assistant. Rewrite the following into detailed natural language."
+        # Matches [LLM: your text here]
+        self.regex = re.compile(r'\[LLM:\s*(.*?)\]', re.IGNORECASE | re.DOTALL)
+
+    def replace(self, prompt):
+        def _process_llm_tag(match):
+            content = match.group(1).strip()
+            if not content: 
+                return ""
+            
+            print(f"[UmiAI] Found LLM Tag. Processing: {content[:20]}...")
+            
+            if self.refiner_model == "None":
+                return "[LLM_ERROR: No Refiner Model Selected]"
+
+            # We reuse the existing naturalizer but force it into text-only mode
+            result = self.node.run_llm_naturalizer(
+                text=content, 
+                model_choice="None", # Skip Vision Stage
+                refiner_choice=self.refiner_model,
+                vision_temperature=0.0,
+                refiner_temperature=self.refiner_temp,
+                max_tokens=self.llm_tokens,
+                custom_prompt=self.custom_prompt,
+                image_input=None
+            )
+            
+            if not result:
+                return "[LLM_ERROR: Empty Output]"
+                
+            return result
+
+        if self.regex.search(prompt):
+            return self.regex.sub(_process_llm_tag, prompt)
+        return prompt
 
 class TagReplacer:
     def __init__(self, tag_selector):
@@ -874,7 +1012,6 @@ class ConditionalReplacer:
                 elif token.startswith('$'):
                     var_name = token[1:]
                     val = variables.get(var_name, False)
-                    # Truthy check (string "false" or "0" becomes False)
                     is_true = bool(val) and str(val).lower() not in ['false', '0', 'no']
                     expression.append(str(is_true))
                     
@@ -910,11 +1047,7 @@ class ConditionalReplacer:
 
 class VariableReplacer:
     def __init__(self):
-        # FIXED: Regex now uses MULTILINE and ^ anchor.
-        # This ensures it only matches assignments at the start of a line,
-        # preventing it from eating logic checks like [if $var=val:]
         self.assign_regex = re.compile(r'^\$([a-zA-Z0-9_]+)\s*=\s*(.*?)$', re.MULTILINE)
-        
         self.use_regex = re.compile(r'\$([a-zA-Z0-9_]+)((?:\.[a-zA-Z_]+)*)')
         self.variables = {}
 
@@ -1044,8 +1177,6 @@ class DanbooruReplacer:
 
 class LoRAHandler:
     def __init__(self):
-        # FIXED: Greedy Regex. Matches <lora:ANYTHING>
-        # We parse the inside manually to be more robust against spaces/typos
         self.regex = re.compile(r'<lora:([^>]+)>', re.IGNORECASE)
         self.blacklist = {
             "1girl", "1boy", "solo", "monochrome", "greyscale", "comic", "scenery",
@@ -1133,57 +1264,51 @@ class LoRAHandler:
         except Exception:
             return None
 
-    def load_lora_cached(self, lora_path):
-        """Simple cache to avoid re-reading safetensors from disk every run."""
+    def load_lora_cached(self, lora_path, limit):
         if lora_path in LORA_MEMORY_CACHE:
-            return LORA_MEMORY_CACHE[lora_path]
+            data = LORA_MEMORY_CACHE.pop(lora_path)
+            LORA_MEMORY_CACHE[lora_path] = data
+            return data
         
+        if limit == 0:
+            return comfy.utils.load_torch_file(lora_path, safe_load=True)
+
         lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
         
-        # Memory Management
-        if len(LORA_MEMORY_CACHE) > MAX_LORA_CACHE_SIZE:
-            keys_to_remove = list(LORA_MEMORY_CACHE.keys())[:int(MAX_LORA_CACHE_SIZE/2)]
-            for k in keys_to_remove:
-                del LORA_MEMORY_CACHE[k]
-                
         LORA_MEMORY_CACHE[lora_path] = lora
+        while len(LORA_MEMORY_CACHE) > limit:
+            LORA_MEMORY_CACHE.popitem(last=False)
+            
         return lora
 
-    def extract_and_load(self, text, model, clip, behavior):
-        # 1. Regex Extraction
+    def extract_and_load(self, text, model, clip, behavior, cache_limit):
         matches = self.regex.findall(text)
         clean_text = self.regex.sub("", text)
         lora_info_output = []
         extracted_tags_str = ""
 
-        # If no model is connected, we return the text stripped of tags
         if model is None or clip is None:
             return clean_text, model, clip, ""
 
         for content in matches:
             content = content.strip()
             
-            # 2. Python Manual Parsing (Robust)
             if ':' in content:
-                # Split on last colon to handle names with colons safely
                 parts = content.rsplit(':', 1)
                 name = parts[0].strip()
                 try:
                     strength = float(parts[1].strip())
                 except ValueError:
-                    # Fallback: Colon was part of filename, strength default 1.0
                     name = content
                     strength = 1.0
             else:
                 name = content
                 strength = 1.0
 
-            # 3. Path Resolution (Native ComfyUI)
             lora_path = folder_paths.get_full_path("loras", name)
             if not lora_path:
                 lora_path = folder_paths.get_full_path("loras", f"{name}.safetensors")
             
-            # 4. Loading & Caching
             if lora_path:
                 tags = self.get_lora_tags(lora_path)
                 info_block = f"[LORA: {name} (Str: {strength})]\n"
@@ -1199,8 +1324,7 @@ class LoRAHandler:
                      extracted_tags_str = ", ".join(tags) + ", " + extracted_tags_str
 
                 try:
-                    # Use Cached Loader
-                    lora = self.load_lora_cached(lora_path)
+                    lora = self.load_lora_cached(lora_path, cache_limit)
                     
                     is_zimage = any(".attention.to_q." in k for k in lora.keys())
                     if is_zimage:
@@ -1266,18 +1390,34 @@ class UmiAIWildcardNode:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             },
             "optional": {
+                # Standard Connections
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
-                "lora_tags_behavior": (["Append to Prompt", "Disabled", "Prepend to Prompt"],),
-                "llm_prompt_enhancer": (["No", "Yes"],),
-                "llm_model": (llm_options,),
-                "llm_temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "llm_max_tokens": ("INT", {"default": 400, "min": 100, "max": 4096}),
-                "custom_system_prompt": ("STRING", {"multiline": True, "default": "", "placeholder": "Leave empty to use the default 'Creative Writer' persona..."}),
-                "input_negative": ("STRING", {"multiline": True, "forceInput": True}),
+                "image": ("IMAGE",), 
+
+                # Basic Settings
+                "lora_tags_behavior": (["Append to Prompt", "Disabled", "Prepend to Prompt"], {"default": "Append to Prompt"}),
+                "lora_cache_limit": ("INT", {"default": 5, "min": 0, "max": 50, "step": 1}),
                 "width": ("INT", {"default": 1024, "min": 64, "max": 8192}),
                 "height": ("INT", {"default": 1024, "min": 64, "max": 8192}),
-                "danbooru_threshold": ("FLOAT", {"default": 0.75, "min": 0.1, "max": 1.0, "step": 0.05}),
+                
+                # --- AUTO UPDATER (BUTTON) ---
+                "update_llama_cpp": ("BOOLEAN", {"default": True, "label_on": "UPDATE & RESTART", "label_off": "Update Disabled"}),
+
+                # --- VISIBLE LLM SETTINGS ---
+                "vision_model": (llm_options, {"default": "None"}),
+                "refiner_model": (llm_options, {"default": "None"}),
+                
+                # SEPARATE TEMPERATURE CONTROLS
+                "vision_temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "refiner_temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "max_tokens": ("INT", {"default": 800, "min": 100, "max": 4096}),
+                
+                "custom_system_prompt": ("STRING", {"multiline": True, "default": "", "placeholder": "Default: You are an AI image prompt assistant. Rewrite the following into detailed natural language."}),
+                "input_negative": ("STRING", {"multiline": True, "forceInput": True}),
+
+                # Danbooru Settings
+                "danbooru_threshold": ("FLOAT", {"default": 0.70, "min": 0.1, "max": 1.0, "step": 0.05}),
                 "danbooru_max_tags": ("INT", {"default": 15, "min": 1, "max": 50}),
             }
         }
@@ -1288,9 +1428,8 @@ class UmiAIWildcardNode:
     CATEGORY = "UmiAI"
     COLOR = "#322947"
     
-    # ComfyUI best practice: this node depends on external files
-    # Returning the seed + text ensures it runs when params change
-    def IS_CHANGED(s, text, seed, **kwargs):
+    @classmethod
+    def IS_CHANGED(cls, text, seed, **kwargs):
         return f"{seed}_{text}"
 
     def extract_settings(self, text):
@@ -1313,68 +1452,283 @@ class UmiAIWildcardNode:
 
     def ensure_model_exists(self, model_choice):
         if model_choice == "None":
-            return None
+            return None, None
+        
         target_folder = os.path.join(folder_paths.models_dir, "llm")
         if not os.path.exists(target_folder):
             os.makedirs(target_folder, exist_ok=True)
 
+        # 1. Download Mode
         if model_choice in DOWNLOADABLE_MODELS:
             if not HF_HUB_AVAILABLE:
-                return None
+                return None, None
+            
             model_info = DOWNLOADABLE_MODELS[model_choice]
             repo_id = model_info["repo_id"]
             filename = model_info["filename"]
+            
+            # Download Main Model
             local_file_path = os.path.join(target_folder, filename)
-            if os.path.exists(local_file_path):
-                return local_file_path
-            try:
-                return hf_hub_download(repo_id=repo_id, filename=filename, local_dir=target_folder, local_dir_use_symlinks=False)
-            except Exception:
-                return None
+            if not os.path.exists(local_file_path):
+                try:
+                    print(f"[UmiAI] Downloading {filename}...")
+                    local_file_path = hf_hub_download(repo_id=repo_id, filename=filename, local_dir=target_folder, local_dir_use_symlinks=False)
+                except Exception as e:
+                    print(f"[UmiAI] Download failed: {e}")
+                    return None, None
+
+            # Download Projector/Adapter (Vision) if required
+            mmproj_path = None
+            if "mmproj" in model_info:
+                mmproj_file = model_info["mmproj"]
+                mmproj_local = os.path.join(target_folder, mmproj_file)
+                if os.path.exists(mmproj_local):
+                    mmproj_path = mmproj_local
+                else:
+                    try:
+                        print(f"[UmiAI] Downloading Vision Adapter {mmproj_file}...")
+                        mmproj_path = hf_hub_download(repo_id=repo_id, filename=mmproj_file, local_dir=target_folder, local_dir_use_symlinks=False)
+                    except Exception:
+                        pass
+            
+            return local_file_path, mmproj_path
+        
+        # 2. Local File Mode (Auto-Detect Adapter)
         else:
+            # Check for exact path
             path = folder_paths.get_full_path("llm", model_choice)
             if not path:
-                path = os.path.join(target_folder, model_choice)
-            return path
+                # Fallback: check simply inside models/llm/
+                potential = os.path.join(target_folder, model_choice)
+                if os.path.exists(potential):
+                    path = potential
+            
+            if not path:
+                return None, None
+            
+            # --- AGGRESSIVE ADAPTER SEARCH ---
+            mmproj_path = None
+            
+            # Strategy A: Check exact name pairs
+            base = os.path.splitext(path)[0]
+            candidates = [
+                base + "-mmproj.gguf", 
+                base + ".mmproj.gguf", 
+                base + "-vision.gguf",
+                base.replace("Q4_K_M", "mmproj-f16"),
+                base.replace("Q6_K", "mmproj-f16"),
+                base.replace("Q4_K", "mmproj-Q4_0"), # Common for Llava
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    mmproj_path = c
+                    break
+            
+            # Strategy B: Scan folder for ANY 'mmproj' file
+            # If not found, scan directory for matching mmproj
+            if not mmproj_path:
+                folder = os.path.dirname(path)
+                # Filter for JoyCaption specific or generic
+                is_joy = "joycaption" in model_choice.lower()
+                is_llava = "llava" in model_choice.lower()
+                
+                for f in os.listdir(folder):
+                    if "mmproj" in f.lower() and f.endswith(".gguf"):
+                        if is_joy and "joycaption" in f.lower():
+                            mmproj_path = os.path.join(folder, f)
+                            break
+                        if is_llava and "llava" in f.lower():
+                             mmproj_path = os.path.join(folder, f)
+                             break
 
-    def run_llm_naturalizer(self, text, model_choice, temperature, max_tokens, custom_prompt):
+            return path, mmproj_path
+
+    def run_llm_naturalizer(self, text, model_choice, refiner_choice, vision_temperature, refiner_temperature, max_tokens, custom_prompt, image_input=None):
         if not LLAMA_CPP_AVAILABLE:
-            return text
-        model_path = self.ensure_model_exists(model_choice)
-        if not model_path:
-            return text
+            return "[Error: llama_cpp_python not installed]"
+        
+        # --- STAGE 1: VISION (Only if Image Input is present) ---
+        raw_vision_output = ""
+        
+        if is_valid_image(image_input) and model_choice != "None":
+            # GC
+            gc.collect()
+            torch.cuda.empty_cache()
 
-        try:
-            llm = Llama(model_path=model_path, n_ctx=4096, n_gpu_layers=0, verbose=False)
-            default_system_prompt = "You are an AI image prompt assistant. Rewrite the following tags into detailed natural language."
-            final_system_prompt = custom_prompt.strip() if custom_prompt.strip() else default_system_prompt
-            user_input = f"Write a detailed visual description based on these tags: {text}"
+            model_path, mmproj_path = self.ensure_model_exists(model_choice)
+            if not model_path:
+                return f"[Error: Model '{model_choice}' not found]"
 
-            if "dolphin" in model_path.lower():
-                prompt = f"<|im_start|>system\n{final_system_prompt}<|im_end|>\n<|im_start|>user\n{user_input}<|im_end|>\n<|im_start|>assistant\n"
-                output = llm.create_completion(prompt, stop=["<|im_end|>"], temperature=temperature, max_tokens=max_tokens)
-                return output['choices'][0]['text'].strip()
-            else:
-                output = llm.create_chat_completion(
-                    messages=[{"role": "system", "content": final_system_prompt}, {"role": "user", "content": user_input}],
-                    temperature=temperature, max_tokens=max_tokens
+            # Hallucination Guard
+            if is_valid_image(image_input) and not mmproj_path:
+                return "[VISION_ERROR: Model Loaded but Vision Adapter (.mmproj) Not Found.]"
+
+            print(f"[UmiAI] Vision Adapter Loaded: {mmproj_path}")
+
+            llm = None
+            try:
+                chat_handler = None
+                if mmproj_path:
+                    # USE CUSTOM HANDLER FOR JOYCAPTION (LLAMA 3)
+                    if "joycaption" in str(model_choice).lower():
+                        chat_handler = JoyCaptionChatHandler(clip_model_path=mmproj_path)
+                    else:
+                        chat_handler = Llava15ChatHandler(clip_model_path=mmproj_path)
+                
+                # Initialize Llama 
+                llm = Llama(
+                    model_path=model_path, 
+                    chat_handler=chat_handler,
+                    n_ctx=4096, 
+                    n_gpu_layers=-1, 
+                    verbose=True 
                 )
-                return output['choices'][0]['message']['content'].strip()
-        except Exception:
-            return text
+                
+                messages = []
+                user_content = []
+                
+                # Convert Tensor (Batch, H, W, C) -> PIL -> Base64
+                i = 255. * image_input[0].cpu().numpy()
+                img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+                
+                buffered = io.BytesIO()
+                img.save(buffered, format="JPEG")
+                img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img_str}"}
+                })
+                
+                # GENERIC PROMPT FOR VISION (Just get the data)
+                user_content.append({"type": "text", "text": "Describe this image in extreme detail."})
+                messages.append({"role": "user", "content": user_content})
+
+                output = llm.create_chat_completion(
+                    messages=messages,
+                    temperature=vision_temperature, 
+                    max_tokens=max_tokens
+                )
+                
+                raw_vision_output = output['choices'][0]['message']['content'].strip()
+                
+                if len(raw_vision_output) > 20 and raw_vision_output[:10] == "1: 1: 1: 1":
+                    return "[VISION_ERROR: Projector Mismatch. Please use Auto-Update to install compatible llama-cpp-python.]"
+                    
+            except Exception as e:
+                print(f"[UmiAI] LLM/Vision Error: {e}")
+                return f"[Error: {str(e)}]"
+            
+            finally:
+                if llm:
+                    del llm
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        # --- STAGE 2: REFINEMENT (Only if Refiner Model is selected) ---
+        if refiner_choice != "None":
+            # IMPORTANT: If Vision Failed (raw_vision_output is empty), we must abort.
+            if not raw_vision_output and not text:
+                 return "[VISION_ERROR: Vision Model failed to generate text. Check console for details.]"
+            
+            # If no vision output but we have text (Global Override Mode), use text
+            if not raw_vision_output:
+                 raw_vision_output = text
+
+            # GC Again before loading second model
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+            refiner_path, _ = self.ensure_model_exists(refiner_choice)
+            if not refiner_path:
+                return raw_vision_output # Fallback to raw output if refiner fails
+
+            print(f"[UmiAI] Loading Refiner: {refiner_path}")
+            
+            refiner_llm = None
+            try:
+                # Initialize Text-Only Model
+                refiner_llm = Llama(
+                    model_path=refiner_path, 
+                    n_ctx=4096, 
+                    n_gpu_layers=-1, 
+                    verbose=True 
+                )
+                
+                instruction = custom_prompt if custom_prompt else "You are an AI image prompt assistant. Rewrite the following into detailed natural language."
+                
+                # =========================================================================
+                # 3. MANUAL PROMPT CONSTRUCTION FOR DOLPHIN/LLAMA 3 (NUCLEAR OPTION)
+                #    We detect if it's Dolphin/Llama and use raw completion instead of chat.
+                #    This is the only 100% reliable way to stop the "Parroting" loop.
+                # =========================================================================
+                
+                is_dolphin_or_llama = "dolphin" in refiner_choice.lower() or "llama" in refiner_choice.lower() or "imp" in refiner_choice.lower()
+                
+                if is_dolphin_or_llama:
+                    print("[UmiAI] Detected Dolphin/Llama-3 model. Using Manual Prompt Construction.")
+                    
+                    # Manually constructed Llama-3 prompt string
+                    prompt_string = (
+                        "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+                        f"{instruction}<|eot_id|>"
+                        "<|start_header_id|>user<|end_header_id|>\n\n"
+                        f"{raw_vision_output}<|eot_id|>"
+                        "<|start_header_id|>assistant<|end_header_id|>\n\n"
+                    )
+                    
+                    # Use create_completion (Raw) instead of chat completion
+                    output = refiner_llm.create_completion(
+                        prompt=prompt_string,
+                        temperature=refiner_temperature,
+                        max_tokens=max_tokens,
+                        stop=["<|eot_id|>", "<|end_of_text|>", "</s>"]
+                    )
+                    return output['choices'][0]['text'].strip()
+
+                else:
+                    # FALLBACK FOR QWEN / OTHER MODELS (Chat Completion works fine usually)
+                    messages = [
+                        {"role": "system", "content": instruction},
+                        {"role": "user", "content": raw_vision_output}
+                    ]
+                    
+                    output = refiner_llm.create_chat_completion(
+                        messages=messages,
+                        temperature=refiner_temperature,
+                        max_tokens=max_tokens
+                    )
+                    return output['choices'][0]['message']['content'].strip()
+
+            except Exception as e:
+                print(f"[UmiAI] Refiner Error: {e}")
+                return raw_vision_output # Fallback
+            
+            finally:
+                if refiner_llm:
+                    del refiner_llm
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        # If no refiner, return raw vision output
+        return raw_vision_output
 
     # --- SAFETY HELPER ---
     def get_val(self, kwargs, key, default, value_type=None):
         val = kwargs.get(key, default)
         
-        # Type enforcement
-        if value_type and not isinstance(val, value_type):
+        if val is None:
+            return default
+
+        if value_type:
             try:
                 if value_type == int:
-                    return int(val)
+                    return int(float(val)) 
                 if value_type == float:
                     return float(val)
                 if value_type == str:
+                    if isinstance(val, (int, float)):
+                        return str(val) 
                     return str(val)
             except:
                 return default
@@ -1382,43 +1736,52 @@ class UmiAIWildcardNode:
         return val
 
     def process(self, **kwargs):
-        # 1. EXTRACT INPUTS SAFELY (CRASH PROOFING)
+        # 1. AUTO-UPDATE CHECK (BUTTON LOGIC)
+        do_update = kwargs.get("update_llama_cpp", False)
+        if do_update:
+            success = perform_library_update()
+            if success:
+                raise Exception("Auto-Update Complete! Please Restart ComfyUI now.")
+            else:
+                raise Exception("Auto-Update Failed! Check console for errors.")
+
+        import numpy as np 
+
         text = self.get_val(kwargs, "text", "", str)
         seed = self.get_val(kwargs, "seed", 0, int)
         
-        # Objects (Model/CLIP) - Handle None explicitly (standard Comfy behavior)
         model = kwargs.get("model", None)
         clip = kwargs.get("clip", None)
+        image_input = kwargs.get("image", None)
 
-        # Settings with defaults
         width = self.get_val(kwargs, "width", 1024, int)
         height = self.get_val(kwargs, "height", 1024, int)
         lora_tags_behavior = self.get_val(kwargs, "lora_tags_behavior", "Append to Prompt", str)
+        lora_cache_limit = self.get_val(kwargs, "lora_cache_limit", 5, int) 
         input_negative = self.get_val(kwargs, "input_negative", "", str)
 
-        # LLM Settings
-        llm_prompt_enhancer = self.get_val(kwargs, "llm_prompt_enhancer", "No", str)
-        llm_model = self.get_val(kwargs, "llm_model", "None", str)
-        llm_temperature = self.get_val(kwargs, "llm_temperature", 0.7, float)
-        llm_max_tokens = self.get_val(kwargs, "llm_max_tokens", 400, int)
+        # RENAMED INPUTS
+        vision_model = self.get_val(kwargs, "vision_model", "None", str)
+        refiner_model = self.get_val(kwargs, "refiner_model", "None", str)
+
+        vision_temperature = self.get_val(kwargs, "vision_temperature", 0.2, float)
+        refiner_temperature = self.get_val(kwargs, "refiner_temperature", 0.7, float)
+        max_tokens = self.get_val(kwargs, "max_tokens", 400, int)
         custom_system_prompt = self.get_val(kwargs, "custom_system_prompt", "", str)
 
-        # Danbooru Settings
-        danbooru_threshold = self.get_val(kwargs, "danbooru_threshold", 0.75, float)
+        danbooru_threshold = self.get_val(kwargs, "danbooru_threshold", 0.70, float)
         danbooru_max_tags = self.get_val(kwargs, "danbooru_max_tags", 15, int)
 
         # ============================================================
         # CORE PROCESSING
         # ============================================================
         
-        # Strip comments
         protected_text = text.replace('__#', '___UMI_HASH_PROTECT___').replace('<#', '<___UMI_HASH_PROTECT___')
         clean_lines = []
         for line in protected_text.splitlines():
             if '//' in line:
                 line = line.split('//')[0]
             if '#' in line and not line.strip().startswith("#"):
-                 # Only split if # is used as comment not as first char (e.g. #tag)
                  if ' #' in line:
                     line = line.split(' #')[0]
             
@@ -1429,8 +1792,6 @@ class UmiAIWildcardNode:
         text = "\n".join(clean_lines)
         text = text.replace('___UMI_HASH_PROTECT___', '#').replace('<___UMI_HASH_PROTECT___', '<#')
 
-        # FIXED: DO NOT set global random seed.
-        
         options = {
             'verbose': False, 
             'seed': seed,
@@ -1440,7 +1801,6 @@ class UmiAIWildcardNode:
         all_wildcard_paths = get_all_wildcard_paths()
         tag_loader = TagLoader(all_wildcard_paths, options)
         
-        # Initialize Core classes (Selector now handles its own private RNG based on seed)
         tag_selector = TagSelector(tag_loader, options)
         neg_gen = NegativePromptGenerator()
         
@@ -1450,6 +1810,12 @@ class UmiAIWildcardNode:
         variable_replacer = VariableReplacer()
         danbooru_replacer = DanbooruReplacer(options)
         lora_handler = LoRAHandler()
+        
+        # Initialize VisionReplacer
+        vision_replacer = VisionReplacer(self, vision_model, refiner_model, vision_temperature, refiner_temperature, max_tokens, image_input)
+        
+        # Initialize LLMReplacer
+        llm_replacer = LLMReplacer(self, refiner_model, refiner_temperature, max_tokens, custom_system_prompt)
 
         globals_dict = tag_loader.load_globals()
         variable_replacer.load_globals(globals_dict)
@@ -1461,6 +1827,11 @@ class UmiAIWildcardNode:
 
         while previous_prompt != prompt and iterations < 50:
             previous_prompt = prompt
+            
+            # Process Vision and LLM tags
+            prompt = vision_replacer.replace(prompt)
+            prompt = llm_replacer.replace(prompt)
+
             prompt = variable_replacer.store_variables(prompt, tag_replacer, dynamic_replacer)
             tag_selector.update_variables(variable_replacer.variables)
             prompt = variable_replacer.replace_variables(prompt)
@@ -1469,7 +1840,6 @@ class UmiAIWildcardNode:
             prompt = danbooru_replacer.replace(prompt, danbooru_threshold, danbooru_max_tags)
             iterations += 1
             
-        # FIX: Pass variables to conditional replacer
         prompt = conditional_replacer.replace(prompt, variable_replacer.variables)
         
         additions = tag_selector.get_prefixes_and_suffixes()
@@ -1489,15 +1859,7 @@ class UmiAIWildcardNode:
         prompt = re.sub(r',\s*,', ',', prompt)
         prompt = re.sub(r'\s+', ' ', prompt).strip().strip(',')
 
-        if llm_prompt_enhancer == "Yes" and llm_model != "None":
-            lora_regex = re.compile(r'<lora:[^>]+>')
-            lora_tags = lora_regex.findall(prompt)
-            clean_for_llm = lora_regex.sub("", prompt).strip()
-            naturalized_text = self.run_llm_naturalizer(clean_for_llm, llm_model, llm_temperature, llm_max_tokens, custom_system_prompt)
-            prompt = naturalized_text + " " + " ".join(lora_tags)
-
-        # Process LoRAs (now with Caching)
-        prompt, final_model, final_clip, lora_info = lora_handler.extract_and_load(prompt, model, clip, lora_tags_behavior)
+        prompt, final_model, final_clip, lora_info = lora_handler.extract_and_load(prompt, model, clip, lora_tags_behavior, lora_cache_limit)
 
         generated_negatives = neg_gen.get_negative_string()
         final_negative = input_negative
@@ -1526,15 +1888,11 @@ async def get_wildcards(request):
     loader = TagLoader(all_paths, options)
     loader.build_index()
     
-    # 1. Get Wildcards and Tags (FIX: Combine for autocomplete)
-    # Using set to avoid duplicates between file names and tags if any exist
     combined_list = sorted(list(loader.files_index | loader.umi_tags))
     
-    # 2. Get LoRAs
     loras = folder_paths.get_filename_list("loras")
     loras = sorted(loras) if loras else []
 
-    # FIX: Return merged list as 'wildcards' so frontend sees them
     return web.json_response({
         "wildcards": combined_list,
         "loras": loras,
@@ -1542,10 +1900,8 @@ async def get_wildcards(request):
 
 @server.PromptServer.instance.routes.post("/umiapp/refresh")
 async def refresh_wildcards(request):
-    """Refreshes the global cache and returns the new list."""
     GLOBAL_CACHE.clear()
     
-    # Reset Index Cache so it rebuilds
     GLOBAL_INDEX['built'] = False 
     GLOBAL_INDEX['files'] = set()
     GLOBAL_INDEX['entries'] = {}
@@ -1556,7 +1912,6 @@ async def refresh_wildcards(request):
     loader = TagLoader(all_paths, options)
     loader.build_index() 
     
-    # FIX: Merge lists here as well
     combined_list = sorted(list(loader.files_index | loader.umi_tags))
     
     loras = folder_paths.get_filename_list("loras")
